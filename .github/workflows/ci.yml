@@ -9,14 +9,16 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq luajit
       - name: App mock test (stubbed CSP API, every page and pass)
         run: luajit tools/lua_mock_test.lua
+      - name: Every CSP Lua call exists in the SDK (CSP 0.3.0-preview728)
+        run: python3 tools/sdk_check.py tools/sdk_names_csp4263.txt
       - name: Consistency
         run: python3 tools/check_consistency.py
       - name: Package (drag-into-Content-Manager zip)
         run: python3 tools/package.py dist
       - uses: actions/upload-artifact@v4
         with:
-          name: pitwall
-          path: dist/Pitwall-v*.zip
+          name: lumicorsa
+          path: dist/Lumicorsa-v*.zip
 
   shaders:
     runs-on: windows-latest

@@ -1,124 +1,71 @@
--- Runs Pitwall under LuaJIT with a stubbed CSP API (no Assetto Corsa needed). It checks:
---   1. the schema parser on every format CSP uses (bool, ranges with units/round/perc, quoted / "for" / "or" enums);
---   2. every shader pass: textures and values bound from Lua match the shader's `// @textures` / `// @values` header;
---   3. the pass graph for each effect toggle, bypass (draws nothing) and the other-grading-app rule;
---   4. every page, with every control on it clicked: no errors, and each write lands in the right place
---      (CSP module config, video.ini, audio, weather time, Pure style options) — sliders only after they settle.
+-- Runs Lumicorsa under LuaJIT against a stubbed CSP (no Assetto Corsa needed). Config files live in memory keyed by
+-- path, so set() writes and the self-test's from-disk readbacks go through the same "files". It checks:
+--   1. the CSP schema parser on every syntax CSP uses;
+--   2. every shader pass: bound textures/values match the shader's `// @textures` / `// @values` header;
+--   3. every tab draws in Basic, Advanced and Expert, and every control on it can be clicked without an error;
+--   4. the built-in self-test runs over every control and reports no FAIL (only PASS or LOCKED);
+--   5. debounced writes, palette search, quick ring, HUD in km/h and mph, proof capture and a short online soak.
 -- usage (from the repo root): luajit tools/lua_mock_test.lua
 
-package.path = 'app/Pitwall/?.lua;' .. package.path
+package.path = 'app/Lumicorsa/?.lua;' .. package.path
 
 -- ---------------------------------------------------------------------------------------------- vectors
-local V2, V3, V4, RGBM = {}, {}, {}, {}
-for _, m in ipairs({ V2, V3, V4, RGBM }) do m.__index = m end
-V2.__add = function (a, b) return vec2(a.x + b.x, a.y + b.y) end
-V2.__sub = function (a, b) return vec2(a.x - b.x, a.y - b.y) end
-local function isV2(x) return getmetatable(x) == V2 end
-local function isV3(x) return getmetatable(x) == V3 end
+local V2, V3, RGBM = {}, {}, {}
+V2.__index, V3.__index, RGBM.__index = V2, V3, RGBM
 function vec2(x, y) return setmetatable({ x = x or 0, y = y or 0 }, V2) end
 function vec3(x, y, z) return setmetatable({ x = x or 0, y = y or 0, z = z or 0 }, V3) end
-function vec4(x, y, z, w) return setmetatable({ x = x or 0, y = y or 0, z = z or 0, w = w or 0 }, V4) end
+function vec4(x, y, z, w) return { x = x or 0, y = y or 0, z = z or 0, w = w or 0 } end
 function rgbm(r, g, b, m) return setmetatable({ r = r, g = g, b = b, mult = m }, RGBM) end
+local function num(a) return type(a) == 'number' end
+V2.__add = function (a, b) return vec2(a.x + b.x, a.y + b.y) end
+V2.__sub = function (a, b) return vec2(a.x - b.x, a.y - b.y) end
+V2.__mul = function (a, b) if num(a) then a, b = b, a end; if num(b) then return vec2(a.x * b, a.y * b) end; return vec2(a.x * b.x, a.y * b.y) end
+V2.__div = function (a, b) return vec2(a.x / b, a.y / b) end
+V2.__unm = function (a) return vec2(-a.x, -a.y) end
+V3.__mul = function (a, b) if num(a) then a, b = b, a end; return vec3(a.x * b, a.y * b, a.z * b) end
+local function kind(x)
+  if type(x) == 'number' then return 'number' end
+  local mt = getmetatable(x)
+  if mt == V2 then return 'vec2' elseif mt == V3 then return 'vec3' elseif mt == RGBM then return 'rgbm' end
+  return type(x)
+end
 
 -- ---------------------------------------------------------------------------------------------- fake CSP world
 local now = 0
-local intervals, timeouts, buttons, storages = {}, {}, {}, {}
-local hud = nil
-local log = { updates = {}, finals = {}, errors = {}, texts = {}, writes = {}, calls = {} }
-local function fail(msg) error(msg, 0) end
-local function record(kind, ...) log.writes[#log.writes + 1] = { kind = kind, args = { ... } } end
-local function wrote(kind, a, b, c)
-  for _, w in ipairs(log.writes) do
-    if w.kind == kind and (a == nil or w.args[1] == a) and (b == nil or w.args[2] == b) and (c == nil or w.args[3] == c) then return w end
-  end
-end
+local timeouts, intervals, buttons, storages = {}, {}, {}, {}
+local hud, log = nil, { errors = {}, passes = {}, writes = 0, shots = 0, texts = {} }
+local function fail(m) error(m, 0) end
 
 function setInterval(fn) intervals[#intervals + 1] = fn end
-function setTimeout(fn) timeouts[#timeouts + 1] = fn end
-JSON = { stringify = function () return '{}' end, parse = function () return {} end }
-math.applyLag = function (v, t, lag) return t + (v - t) * lag end
+function setTimeout(fn, d) timeouts[#timeouts + 1] = fn end
+JSON = {
+  stringify = function (t)
+    local function enc(v)
+      if type(v) == 'table' then
+        local parts = {}
+        for k, x in pairs(v) do parts[#parts + 1] = string.format('%q:%s', tostring(k), enc(x)) end
+        return '{' .. table.concat(parts, ',') .. '}'
+      elseif type(v) == 'string' then return string.format('%q', v)
+      else return tostring(v) end
+    end
+    return enc(t)
+  end,
+  parse = function (s)   -- minimal JSON reader for what the app writes (objects, strings, numbers, booleans)
+    if s == nil or s == '' then error('empty') end
+    local lua = s:gsub('"([^"]-)":', '["%1"]='):gsub('%[', '{'):gsub('%]', '}')
+    lua = lua:gsub('{"([^"]-)"}=', '["%1"]=')
+    local f = load('return ' .. lua)
+    if not f then error('bad json') end
+    return f()
+  end,
+}
 os.preciseClock = function () return now end
 
-render = {
-  TextureFormat = { R16G16B16A16 = { Float = 10 } }, AntialiasingMode = { None = 0 },
-  BlendMode = { Opaque = 0, AlphaBlend = 1 },
-  projectPoint = function () return vec2(0.5, 0.3) end,
-}
-
--- Synthetic schema files in CSP's format (every syntax variant the parser has to handle).
-local SCHEMA = {
-  graphics_adjustments = [[
-[FSR]
-ACTIVE=0 ; Active; 1 or 0; not available with IS_LIVE__
-OLD_IMPLEMENTATION=0 ; Method; "AMD FSR (v1.0.2, any GPU)" is 0, __separator__, "NVIDIA DLSS (v310, requires NVIDIA GPU, ⏬29.4 MB)" is 3, "AMD FSR3/4 (v3.1.5, any GPU)" is 12
-QUALITY_DLSS=0.58 ; Quality; "Custom (Any%)" is -1, "DLAA (100%)" is 1, "Quality (67%)" is 0.6667, "Balanced (58%)" is 0.58
-SHARPEN_DLSS=0 ; Sharpness; from 0 to 1, perc.; visible with OLD_IMPLEMENTATION=3
-QUALITY_FSR34=0.58 ; Quality; "Quality (67%)" is 0.6667, "Balanced (58%)" is 0.58
-SHARPEN_FSR34=0.5 ; Sharpness; from 0 to 1, perc.
-QUALITY2=0.77 ; Quality; "Best Quality (87%)" is 0.87, "Ultra Quality (77%)" is 0.77
-SHARPEN2=0.5 ; Sharpness; from 0 to 1, perc.
-[ANTIALIASING]
-MODE=CMAA ;; DISABLED, Original is DEFAULT, __separator__, “CMAA 2.0” is CMAA, “FXAA 3.11” is FXAA3
-QUALITY=HIGH ;; MEDIUM, HIGH or ULTRA; visible with MODE:CMAA
-[RENDER_SCALE]
-SCALE=1 ; Density; from 0.1 to 1, perc.
-[LODS]
-CARS_DISTANCE_MULT=1 ; Multiplier for car LODs; from 0.2 to 3.2, perc
-TRACK_DISTANCE_MULT=1 ; Multiplier for track LODs; from 0.2 to 3.2, perc
-TREES_DISTANCE_MULT=1 ; Multiplier for trees LODs; from 0.2 to 3.2, perc
-HIDE_DISTANT_DRIVERS=1 ; Hide drivers for distant cars; 1 or 0
-COCKPIT_LR_FIX=1 ; Force low-res cockpits; 1 or 0
-[SCRIPTABLE_FILTER]
-ENABLED=0 ; Active; 1 or 0
-IMPLEMENTATION=tunnel ; Filter script; look for filter.lua in extension/lua/pp-filters; only with ENABLED
-[DEV]
-SECRET=1 ; hidden
-]],
-  extra_fx = [[
-[BASIC]
-ENABLED=0 ; Active (set to 0 to disable Extra FX); 1 or 0
-[TAA]
-ENABLED=1 ; Active; 1 or 0
-EXTRA_SHARPEN_PASS=0.5 ; Extra sharpness; from 0 to 1, perc.
-[MOTION_BLUR]
-ENABLED=0 ; Active; 1 or 0
-MULT=0.5 ; Amount of blur; from 0 to 1, perc.
-[SSLR]
-ENABLED=1 ; Active; 1 or 0
-[ASSAO]
-ENABLED=0 ; Active; 1 or 0
-[HBAO]
-ENABLED=0 ; Active; 1 or 0
-[SSAO]
-ENABLED2=0 ; Active; 1 or 0
-[SS_LIGHTING]
-ENABLED=1 ; Active; 1 or 0
-[SSGI]
-ENABLED2=0 ; Active; 1 or 0
-[VOLUMETRIC_LIGHTS]
-ENABLED=1 ; Active; 1 or 0
-INTENSITY_MULT=1.5 ; Luminocity; from 0 to 2, perc.
-[FOG_BLUR]
-ENABLED=1 ; Active; 1 or 0
-]],
-  smart_shadows = "[BASIC]\nAUTOMATIC_SPLITS_DISTANCE=200 ; Shadows distance; from 50 m to 400, round to 10; visible with AUTOMATIC_SPLITS\n",
-  lighting_fx = "[PERFORMANCE]\nCARS_WITH_LIGHTS=10 ; Cars casting lights; from 0 car(s) to 50, round\n[SHADOWS]\nENABLED=0 ; Active; 1 or 0\nCARS_SHADOWS=2 ; Cars with shadows; from 0 to 5, round to 1\n",
-  reflections_fx = "[MAIN_CUBEMAP]\nRESOLUTION2=512 ; Main resolution; \"256×256\" is 256, \"512×512 (recommended)\" is 512, \"1024×1024\" is 1024\n[LOCAL_CUBEMAPS_CARS2]\nENABLED=1 ; Enable; 1 or 0\n",
-  particles_fx = "[SMOKE]\nENABLED=1 ; Active; 1 or 0\nLONG_LASTING_SMOKE=1 ; Long-lasting smoke; 1 or 0\n[SPARKS]\nENABLED=1 ; Active; 1 or 0\n[AC_PARTICLES]\nREWORKED_HEAT_SHIMMER=1 ; Updated heat shimmer; 1 or 0\n",
-  grass_fx = "[BASIC]\nQUALITY=2 ; Quality; 0 for Very low, 1 for Low, 2 for Medium, 3 for High, 4 for Very high\n[RENDERING]\nCAST_SHADOWS=0 ; Cast shadows when possible; 1 or 0\n",
-  rain_fx = "[SCREEN_DROPS]\nENABLED=1 ; Active; 1 or 0\nINTENSITY_MULT=1 ; Intensity multiplier; from 0 to 2, perc.\n[VISUAL_TWEAKS]\nRAIN_MAPS_QUALITY=1 ; Rain maps quality; 0 for High, 1 for Medium, 2 for Low\n",
-  weather_fx = "[BASIC]\nENABLED=1 ; Active; 1 or 0\nIMPLEMENTATION=base ; Style\n[MISCELLANEOUS]\nFORCE_HEADLIGHTS=0 ; Force headlights; 1 or 0\nSWITCH_HEADLIGHTS_WITH_AI=1 ; Switch headlights; 1 or 0\nSWITCH_WIPERS_WITH_AI=1 ; Switch wipers; 1 or 0\nUSE_TRACK_SEASONAL_ADJUSTMENTS=1 ; Seasons; 1 or 0\n[PERFORMANCE]\nEXTRA_CLOUDS_FIDELITY=1 ; Extra clouds; 1 or 0\nDETAILED_CLOUD_SHADOWS=1 ; Cloud shadows; 1 or 0\nHIGH_QUALITY_STARS=1 ; Stars; 1 or 0\n[PP_TWEAKS]\nFULL_RESOLUTION=1 ; Full resolution; 1 or 0\n",
-}
-
--- In-memory INI files with CSP's INIConfig interface.
-local files = {
-  ['csp:weather_fx'] = { BASIC = { IMPLEMENTATION = 'pure', ENABLED = 1 } },
-  ['csp:graphics_adjustments'] = { FSR = { ACTIVE = 1, OLD_IMPLEMENTATION = 3 }, SCRIPTABLE_FILTER = { IMPLEMENTATION = 'tunnel' } },
-  video = { POST_PROCESS = { FILTER = 'Dream Realism 7.4', ENABLED = 1 } },
-}
-local function iniFor(name)
-  files[name] = files[name] or {}
-  local data = files[name]
+-- in-memory INI files keyed by path
+local FILES = {}
+local function iniAt(path)
+  FILES[path] = FILES[path] or {}
+  local data = FILES[path]
   return {
     get = function (_, s, k, d)
       local v = data[s] and data[s][k]
@@ -127,278 +74,268 @@ local function iniFor(name)
       return v
     end,
     set = function (_, s, k, v) data[s] = data[s] or {}; data[s][k] = v end,
-    setAndSave = function (_, s, k, v) data[s] = data[s] or {}; data[s][k] = v; record(name, s, k, v); return true end,
-    save = function () record(name .. ':save') end,
+    setAndSave = function (_, s, k, v) data[s] = data[s] or {}; data[s][k] = v; log.writes = log.writes + 1; return true end,
+    save = function () log.writes = log.writes + 1 end,
   }
 end
 
-local volumes = { main = 0.8, engine = 0.7, transmission = 0.5, tyres = 0.6, surfaces = 0.6, dirt = 0.5, wind = 0.4,
-  opponents = 0.5, carComponents = 0.5, track = 0.5, weather = 0.5, rain = 0.5, wipers = 0.5 }
-
-local SIM = {
-  windowSize = vec2(1920, 1080), cameraClipNear = 0.1, cameraClipFar = 5000, isVRMode = false, isHDR = false,
-  upscaleAppliedFactor = 0.58, isFSRActive = false, isTAAActive = true, isOnlineRace = false, isReplayActive = false,
-  lightDirection = vec3(0, 0.8, 0.6), cameraLook = vec3(0, 0.3, 0.95), cameraPosition = vec3(0, 2, 0),
-  weatherType = 15, timeHours = 13, timeMinutes = 5, timeTotalSeconds = 47100, ambientTemperature = 24, roadTemperature = 31,
-  windSpeedKmh = 9, windDirectionDeg = 220, rainIntensity = 0, rainWetness = 0, firstPersonCameraFOV = 56,
+local SCHEMA = {
+  graphics_adjustments = '[FSR]\nACTIVE=0 ; Active; 1 or 0\nOLD_IMPLEMENTATION=0 ; Method; "AMD FSR (v1.0.2, any GPU)" is 0, __separator__, "NVIDIA DLSS (v310, requires NVIDIA GPU)" is 3, "AMD FSR3/4 (v3.1.5)" is 12\n' ..
+    'QUALITY_DLSS=0.58 ; Quality; "DLAA (100%)" is 1, "Quality (67%)" is 0.6667, "Balanced (58%)" is 0.58\nSHARPEN_DLSS=0 ; Sharpness; from 0 to 1, perc.\n' ..
+    '[RENDER_SCALE]\nSCALE=1 ; Density; from 0.1 to 1, perc.\n[LODS]\nTRACK_DISTANCE_MULT=1 ; Track; from 0.2 to 3.2, perc\nCARS_DISTANCE_MULT=1 ; Cars; from 0.2 to 3.2, perc\n' ..
+    '[ANTIALIASING]\nMODE=CMAA ;; DISABLED, Original is DEFAULT, “CMAA 2.0” is CMAA\nQUALITY=HIGH ;; MEDIUM, HIGH or ULTRA\n',
+  extra_fx = '[SSLR]\nENABLED=1 ; Active; 1 or 0\n[ASSAO]\nENABLED=0 ; Active; 1 or 0\n[HBAO]\nENABLED=0 ; Active; 1 or 0\n[SSAO]\nENABLED2=0 ; Active; 1 or 0\n' ..
+    '[LIGHT_BOUNCE]\nENABLED=1 ; Tracks; 1 or 0\nCARS=1 ; Cars; 1 or 0\n[MOTION_BLUR]\nENABLED=0 ; Active; 1 or 0\nMULT=0.5 ; Amount; from 0 to 1, perc.\n',
+  smart_shadows = '[BASIC]\nAUTOMATIC_SPLITS_DISTANCE=200 ; Distance; from 50 m to 400, round to 10\n',
+  grass_fx = '[BASIC]\nQUALITY=2 ; Quality; 0 for Very low, 1 for Low, 2 for Medium, 3 for High, 4 for Very high\n',
+  rain_fx = '[SCREEN_DROPS]\nENABLED=1 ; Active; 1 or 0\n',
+  weather_fx = '[MISCELLANEOUS]\nSWITCH_WIPERS_WITH_AI=1 ; Wipers; 1 or 0\n[PERFORMANCE]\nEXTRA_CLOUDS_FIDELITY=1 ; Clouds; 1 or 0\nDETAILED_CLOUD_SHADOWS=1 ; Shadows; 1 or 0\nHIGH_QUALITY_STARS=1 ; Stars; 1 or 0\n',
+  windscreen_fx = '[REFLECTION]\nENABLED=0 ; Active; 1 or 0\n',
+  ffb_tweaks = '[CUSTOM_SOFT_LOCK]\nDAMPER=0 ; Damper; from 0 to 1, perc.\n[GYRO2]\nENABLED=0 ; Active; 1 or 0\n',
+  nice_screenshots = '[ACCUMULATION_AA]\nRESOLUTION_MULTIPLIER=1 ;; From 1x to 4, round\n',
+  lighting_fx = '[SHADOWS]\nCARS_SHADOWS=2 ; Cars; from 0 to 5, round to 1\n[PERFORMANCE]\nCARS_WITH_LIGHTS=10 ; Cars; from 0 car(s) to 50, round\n',
 }
 
-local function readHeader(code)
+local FOLDER = { [1029] = 'app', [17] = 'X/extconfig', [18] = 'X/cfg/extension', [5] = 'X/cfg', [25] = 'X/cfg/extension/state',
+  [16] = 'X/extension', [4] = 'X/root', [1] = 'X/docs', [12] = 'X/ppfilters' }
+
+local SIM = {
+  windowSize = vec2(1920, 1080), renderSize = vec2(1920, 1080), cameraClipNear = 0.1, cameraClipFar = 5000,
+  isVRMode = false, isHDR = false, isOnlineRace = false, isReplayActive = false, upscaleAppliedFactor = 1, isFSRActive = false, isTAAActive = true,
+  lightDirection = vec3(0, 0.8, 0.6), cameraLook = vec3(0, 0.3, 0.95), cameraUp = vec3(0, 1, 0), cameraSide = vec3(1, 0, 0),
+  cameraPosition = vec3(0, 2, 0), cameraFOV = 56, cameraMode = 0, driveableCameraMode = 0,
+  timeTotalSeconds = 47100, timeHours = 13, timeMinutes = 5, ambientTemperature = 24, rainIntensity = 0,
+  firstPersonCameraFOV = 56, cpuOccupancy = 37,
+}
+local CAR = {
+  speedKmh = 84, rpm = 5400, rpmLimiter = 8000, gear = 3, fuel = 30, maxFuel = 60, oilTemperature = 80, waterTemperature = 85,
+  turningLeftLights = false, turningRightLights = false, turningLightsActivePhase = true, headlightsActive = true, highBeams = false,
+  absInAction = false, tractionControlInAction = false, handbrake = 0, engineLifeLeft = 1000, gearboxDamage = 0, batteryVoltage = 12.6,
+  distanceDrivenTotalKm = 13841.2, distanceDrivenSessionKm = 12.3, isEngineLimiterOn = false, ffbMultiplier = 1,
+  absMode = 1, absModes = 3, tractionControlMode = 1, tractionControlModes = 4, wiperMode = 0, wiperModes = 3,
+  position = vec3(0, 0.5, 0),
+}
+function CAR:id() return 'test_car' end
+
+local WINDOWS = {}
+local function win(name)
+  WINDOWS[name] = WINDOWS[name] or { vis = true, pos = vec2(100, 60), size = vec2() }
+  local w = WINDOWS[name]
+  return {
+    visible = function () return w.vis end, setVisible = function (_, v) w.vis = v end,
+    position = function () return w.pos end, move = function (_, p) w.pos = p end, resize = function (_, s) w.size = s end,
+  }
+end
+
+local volumes = { main = 0.8, engine = 0.9, transmission = 0.6, carComponents = 0.6, tyres = 0.6, surfaces = 0.7, opponents = 0.7, wind = 0.4, track = 0.5 }
+local seat = { position = vec3(0, 1.0, 0.2), pitch = 0, yaw = 0 }
+local timeScale = 1
+
+-- shader header checks
+local function header(code)
   local h = {}
   for key, rest in code:gmatch('// @(%w+)[ \t]*([^\n]*)') do h[key] = rest end
   return h
 end
 local TYPES = { float = 'number', float2 = 'vec2', float3 = 'vec3', float4 = 'rgbm' }
-local function kind(x)
-  if type(x) == 'number' then return 'number' elseif isV2(x) then return 'vec2' elseif isV3(x) then return 'vec3'
-  elseif getmetatable(x) == RGBM then return 'rgbm' end
-  return type(x)
-end
 local function checkPass(p, where)
-  assert(type(p.shader) == 'string' and p.shader:find('float4 main%(PS_IN pin%)'), where .. ': no shader main()')
-  local h = readHeader(p.shader)
-  local wantTex, wantVal = {}, {}
-  for t in (h.textures or ''):gmatch('%S+') do wantTex[t] = true end
-  for n, ty in (h.values or ''):gmatch('(%S+):(%S+)') do wantVal[n] = ty end
-  for t in pairs(wantTex) do if p.textures[t] == nil or p.textures[t] == false then fail(where .. ': texture ' .. t .. ' not bound') end end
-  for t in pairs(p.textures) do if not wantTex[t] then fail(where .. ': texture ' .. t .. ' not in the shader header') end end
-  for n, ty in pairs(wantVal) do
+  assert(type(p.shader) == 'string' and p.shader:find('float4 main%(PS_IN pin%)'), where .. ': no main()')
+  local h = header(p.shader)
+  local wantT, wantV = {}, {}
+  for t in (h.textures or ''):gmatch('%S+') do wantT[t] = true end
+  for n, ty in (h.values or ''):gmatch('(%S+):(%S+)') do wantV[n] = ty end
+  for t in pairs(wantT) do if p.textures[t] == nil or p.textures[t] == false then fail(where .. ': texture ' .. t .. ' not bound') end end
+  for t in pairs(p.textures) do if not wantT[t] then fail(where .. ': texture ' .. t .. ' not in header') end end
+  for n, ty in pairs(wantV) do
     if p.values[n] == nil then fail(where .. ': value ' .. n .. ' missing') end
-    if kind(p.values[n]) ~= TYPES[ty] then fail(where .. ': value ' .. n .. ' is ' .. kind(p.values[n]) .. ', shader wants ' .. ty) end
+    if kind(p.values[n]) ~= TYPES[ty] then fail(where .. ': value ' .. n .. ' is ' .. kind(p.values[n]) .. ', want ' .. ty) end
   end
-  for n in pairs(p.values) do if not wantVal[n] then fail(where .. ': value ' .. n .. ' not in the shader header') end end
-end
-local function shaderName(code)
-  -- first line of the comment block right above the shader's `// @` header (common.hlsl may be prepended)
-  local before = code:sub(1, (code:find('\n// @', 1, true) or 0))
-  local lines = {}
-  for l in before:gmatch('[^\n]*') do lines[#lines + 1] = l end
-  local first = nil
-  for i = #lines, 1, -1 do
-    if lines[i]:match('^//') then first = lines[i] elseif lines[i] ~= '' then break end
-  end
-  return first or '?'
+  for n in pairs(p.values) do if not wantV[n] then fail(where .. ': value ' .. n .. ' not in header') end end
 end
 
--- UI: clicks are routed by widget id so a test can "click everything on one page".
-local clickFilter = function () return false end
-local lastId = ''
+local clickFilter, lastId, mouseLocal = function () return false end, '', vec2(400, 300)
 ui = setmetatable({
-  Icons = setmetatable({}, { __index = function (_, k) return k end }),
-  Alignment = { Start = -1, Center = 0, End = 1 }, KeyIndex = { P = 80, O = 79 },
-  windowSize = function () return vec2(540, 900) end, windowPos = function () return vec2(100, 80) end,
-  mouseLocalPos = function () return vec2(300, 300) end, mouseDelta = function () return vec2() end,
+  KeyIndex = { P = 80, O = 79, H = 72, Q = 81, K = 75 }, Key = { Up = 1, Down = 2, Escape = 3, Enter = 4 },
+  Alignment = { Start = -1, Center = 0, End = 1 }, MouseButton = { Left = 0, Right = 1 }, CornerFlags = { Top = 3 },
+  StyleColor = { FrameBg = 7 }, InputTextFlags = { None = 0 },
+  windowSize = function () return vec2(1480, 940) end, windowPos = function () return vec2(100, 60) end,
+  mouseLocalPos = function () return mouseLocal end, mousePos = function () return vec2(960, 540) end, mouseDelta = function () return vec2(3, -2) end,
   mouseWheel = function () return 0 end, windowHovered = function () return false end,
-  measureDWriteText = function (t, size) return vec2(#tostring(t) * (size or 13) * 0.5, (size or 13) * 1.3) end,
+  measureDWriteText = function (t, size) return vec2(#tostring(t) * (size or 13) * 0.55, (size or 13) * 1.25) end,
   invisibleButton = function (id) lastId = id; return clickFilter(id) end,
-  itemHovered = function () return clickFilter(lastId) end,
-  itemActive = function () return clickFilter(lastId) end,
+  itemHovered = function () return clickFilter(lastId) end, itemActive = function () return clickFilter(lastId) end,
   dwriteDrawText = function (t) log.texts[#log.texts + 1] = t end,
-  dwriteDrawTextClipped = function (t) log.texts[#log.texts + 1] = t end,
+  inputText = function (_, s) return s, false, false end,
+  keyPressed = function () return false end, mouseClicked = function () return false end,
   onExclusiveHUD = function (cb) hud = cb end,
   ExtraCanvas = function (size)
     local c = { sz = size }
     function c:size() return self.sz end
     function c:dispose() end
-    function c:updateWithShader(p)
-      checkPass(p, 'pass ' .. shaderName(p.shader))
-      log.updates[#log.updates + 1] = shaderName(p.shader)
-      return true
-    end
+    function c:updateWithShader(p) checkPass(p, 'pass'); log.passes[#log.passes + 1] = p.shader:match('\n// @textures') and 1; return true end
     return c
   end,
-  renderShader = function (p)
-    checkPass(p, 'renderShader ' .. shaderName(p.shader))
-    if p.textures.txPLBase then
-      local copy = {}
-      for k, v in pairs(p.values) do copy[k] = v end
-      log.finals[#log.finals + 1] = { values = copy, base = p.textures.txPLBase }
-    end
-    return true
-  end,
+  renderShader = function (p) checkPass(p, 'final'); return true end,
 }, { __index = function () return function () end end })
 
-local FOLDERS = { [1029] = 'app', [17] = 'X/extension/config', [16] = 'X/extension', [5] = 'X/cfg', [12] = 'X/ppfilters', [25] = 'X/cfg/extension/state' }
+render = { TextureFormat = { R16G16B16A16 = { Float = 10 } }, AntialiasingMode = { None = 0 }, BlendMode = { Opaque = 0 },
+  projectPoint = function () return vec2(0.5, 0.3) end }
+
 ac = {
-  FolderID = { ACAppsLua = 1029, ExtCfgSys = 17, ExtRoot = 16, Cfg = 5, PPFilters = 12, ExtCfgState = 25 },
-  CSPModuleID = { GraphicsAdjustments = 'graphics_adjustments' },
-  getFolder = function (id) return FOLDERS[id] end,
+  FolderID = { ACAppsLua = 1029, ExtCfgSys = 17, ExtCfgUser = 18, Cfg = 5, ExtCfgState = 25, ExtRoot = 16, Root = 4, Documents = 1, PPFilters = 12 },
+  CameraMode = { Cockpit = 0, Car = 1, Drivable = 2, Track = 3, Helicopter = 4, Free = 6 }, DrivableCamera = { Chase = 0, Chase2 = 1 },
+  ScreenshotFormat = { PNG = 3 },
+  getFolder = function (id) return FOLDER[id] end,
   storage = function (t) storages[#storages + 1] = t; return t end,
-  ControlButton = function (id) local b = {}; function b:onPressed(f) buttons[id] = f end; return b end,
-  accessAppWindow = function (name)
-    if name == 'IMGUI_LUA_Photolap_main' then return nil end
-    return { setVisible = function () record('window', name) end, visible = function () return true end,
-      position = function () return vec2() end, move = function () end }
-  end,
-  setAppWindowVisible = function (id) record('window', id) end,
-  getSim = function () return SIM end,
-  getUI = function () return { windowSize = vec2(1920, 1080), dt = 0.016 } end,
+  ControlButton = function (id) local b = { id = id, isDown = false }; function b:onPressed(f) buttons[id] = f end; function b:down() return self.isDown end; buttons[id .. '#obj'] = b; return b end,
+  accessAppWindow = function (n) return win(n) end, setAppWindowVisible = function () end,
+  getSim = function () return SIM end, getCar = function () return CAR end,
+  getUI = function () return { windowSize = vec2(1920, 1080), dt = 1 / 60 } end,
   INIConfig = {
-    cspModule = function (id) return iniFor('csp:' .. id) end,
-    videoConfig = function () return iniFor('video') end,
-    load = function (path) return iniFor('file:' .. path) end,
+    cspModule = function (id) return iniAt('X/cfg/extension/' .. id .. '.ini') end,
+    videoConfig = function () return iniAt('X/cfg/video.ini') end,
+    controlsConfig = function () return iniAt('X/cfg/controls.ini') end,
+    load = function (p) return iniAt(p) end,
   },
-  isModuleActive = function () return true end,
-  getAppWindows = function () return ac._windows or {} end,
-  getPerformanceCPUAndGPUTime = function () return 5.0, 8.0 end,
-  getPpFilter = function () return 'Dream Realism 7.4.ini' end,
+  onCSPConfigChanged = function () end, onFileChanged = function () end, onSessionStart = function () end, onRelease = function () end,
+  getAppWindows = function () return {} end,
+  getPerformanceCPUAndGPUTime = function () return 6, 7 end,
+  getVRAMConsumption = function () return { budget = 12 * 1024 ^ 3, usage = 6 * 1024 ^ 3 } end,
+  getServerName = function () return SIM.isOnlineRace and 'No Hesi | Test' or nil end,
   getAudioVolume = function (k) return volumes[k] or -1 end,
-  setAudioVolume = function (k, v, car, save) volumes[k] = v; record('audio', k, save) end,
-  setWeatherTimeOffset = function (s) record('timeOffset', s) end,
-  setWeatherTimeMultiplier = function (m) record('timeSpeed', m) end,
-  setFirstPersonCameraFOV = function (v) record('fov', v) end,
-  resetFirstPersonCameraFOV = function () record('fovReset') end,
-  onRelease = function () end, onCSPConfigChanged = function () end, onFileChanged = function () end,
+  setAudioVolume = function (k, v) volumes[k] = v end,
+  setFFBMultiplier = function (v) CAR.ffbMultiplier = v end,
+  setFirstPersonCameraFOV = function (v) SIM.firstPersonCameraFOV = v end,
+  setWeatherTimeOffset = function (d) SIM.timeTotalSeconds = (SIM.timeTotalSeconds + d) % 86400 end,
+  setWeatherTimeMultiplier = function (m) timeScale = m end, getConditionsTimeScale = function () return timeScale end,
+  setABS = function (m) CAR.absMode = m end, setTractionControl = function (m) CAR.tractionControlMode = m end,
+  setCurrentCamera = function (m) SIM.cameraMode = m end, setCurrentDrivableCamera = function (m) SIM.driveableCameraMode = m end,
+  getCameraPositionRelativeToCar = function () return vec3(0, 1, -(_G.__chaseDist or 3.2)) end,
+  applyLiveConfigEdit = function (name, data) local d = data:match('DISTANCE=([%d%.]+)'); if d then _G.__chaseDist = tonumber(d) end end,
+  applyRenderingLimits = function () return { dispose = function () end } end,
+  getOnboardCameraParams = function () return { position = vec3(seat.position.x, seat.position.y, seat.position.z), pitch = 0, yaw = 0 } end,
+  getOnboardCameraDefaultParams = function () return { position = vec3(0, 1.0, 0.2), pitch = 0, yaw = 0 } end,
+  setOnboardCameraParams = function (_, p) seat.position = p.position end,
+  SeatParams = function (pos, pitch, yaw) return { position = pos, pitch = pitch, yaw = yaw } end,
+  setWiperMode = function (m) CAR.wiperMode = m end, setHeadlights = function (v) CAR.headlightsActive = v end,
+  makeScreenshot = function (path, fmt, cb) log.shots = log.shots + 1; if cb then cb(nil) end end,
+  shutdownAssettoCorsa = function () end,
   error = function (...) log.errors[#log.errors + 1] = table.concat({ ... }, ' ') end,
 }
-local DIRS = {
-  ['X/ppfilters'] = { 'default.ini', 'Dream Realism 7.4.ini', 'natural.ini' },
-  ['X/extension/lua/pp-filters'] = { 'pure', 'tunnel', 'vhs' },
-  ['X/extension/weather'] = { 'base', 'pure', 'Pure LCS', 'sol' },
-}
-io.scanDir = function (dir) return DIRS[dir] or {} end
-io.fileExists = function (p) return p:find('X/extension/', 1, true) ~= nil end
-io.dirExists = function (p) return p:find('weather/pure', 1, true) ~= nil or p:find('app/Pure', 1, true) ~= nil end
-local realLoad = function (p) local f = io.open(p, 'rb'); if not f then return nil end; local d = f:read('*a'); f:close(); return d end
+web = { get = function (url, cb) cb(nil, { status = 200, body = 'href="downloads/ReShade_Setup_6.5.1_Addon.exe"' }) end }
+
+local realIo = io
+local SAVED = {}
 io.load = function (p)
-  local mod = p:match('^X/extension/config/(.+)%.ini$')
-  if mod then return SCHEMA[mod] end
-  if p == 'X/extension/weather/pure/manifest.ini' then return '[ABOUT]\nVERSION = 2.71\n' end
-  return realLoad(p)
+  local m = p:match('^X/extconfig/(.+)%.ini$'); if m then return SCHEMA[m] end
+  if SAVED[p] then return SAVED[p] end
+  local f = realIo.open(p, 'rb'); if not f then return nil end; local d = f:read('*a'); f:close(); return d
 end
+io.save = function (p, d) SAVED[p] = d; return true end
+io.fileExists = function (p) return SAVED[p] ~= nil end
+io.dirExists = function (p) return p:find('weather/pure', 1, true) ~= nil or p:find('PurePlanner', 1, true) ~= nil end
+io.createDir = function () end
+io.scanDir = function () return {} end
+io.deleteFile = function (p) SAVED[p] = nil end
+io.loadFromZip = function () return nil end
 
 -- ---------------------------------------------------------------------------------------------- 1. schema parser
-local S = require('src/settings')
+local C = require('backend/config')
 do
-  local sc = S.parseSchema(SCHEMA.graphics_adjustments)
-  assert(sc.FSR.ACTIVE.kind == 'bool', 'bool')
-  local m = sc.FSR.OLD_IMPLEMENTATION
-  assert(m.kind == 'enum' and #m.options == 3 and m.options[2].value == 3 and m.options[1].label:find('AMD FSR', 1, true), 'quoted enum with commas inside')
-  assert(sc.FSR.SHARPEN_DLSS.kind == 'range' and sc.FSR.SHARPEN_DLSS.perc and sc.FSR.SHARPEN_DLSS.max == 1, 'perc range')
-  local aa = sc.ANTIALIASING.MODE
-  assert(aa.kind == 'enum' and aa.options[1].value == 'DISABLED' and aa.options[2].value == 'DEFAULT' and aa.options[3].label == 'CMAA 2.0', 'bare + curly-quoted enum')
-  local q = sc.ANTIALIASING.QUALITY
-  assert(q.kind == 'enum' and #q.options == 3 and q.options[3].value == 'ULTRA', '"X, Y or Z" enum')
-  assert(sc.DEV == nil or sc.DEV.SECRET == nil, 'hidden keys are skipped')
-  local ss = S.parseSchema(SCHEMA.smart_shadows).BASIC.AUTOMATIC_SPLITS_DISTANCE
-  assert(ss.kind == 'range' and ss.min == 50 and ss.max == 400 and ss.round == 10 and ss.unit == 'm', 'range with unit and rounding')
-  local cl = S.parseSchema(SCHEMA.lighting_fx).PERFORMANCE.CARS_WITH_LIGHTS
-  assert(cl.kind == 'range' and cl.max == 50 and cl.round == 1, 'range with "car(s)" unit and bare round')
-  local cs = S.parseSchema(SCHEMA.lighting_fx).SHADOWS.CARS_SHADOWS
-  assert(cs.kind == 'range' and cs.min == 0 and cs.max == 5 and cs.round == 1, '"from 0 to 5, round to 1" (no unit)')
-  local rs = S.parseSchema(SCHEMA.graphics_adjustments).RENDER_SCALE.SCALE
-  assert(rs.min == 0.1 and rs.max == 1 and rs.perc, '"from 0.1 to 1" keeps the decimal minimum')
-  local ld = S.parseSchema(SCHEMA.graphics_adjustments).LODS.CARS_DISTANCE_MULT
-  assert(ld.min == 0.2 and ld.max == 3.2, '"from 0.2 to 3.2, perc"')
-  local gq = S.parseSchema(SCHEMA.grass_fx).BASIC.QUALITY
-  assert(gq.kind == 'enum' and #gq.options == 5 and gq.options[5].label == 'Very high', '"0 for X" enum')
+  local sc = C.parseSchema(SCHEMA.graphics_adjustments)
+  assert(sc.FSR.ACTIVE.kind == 'bool' and sc.FSR.OLD_IMPLEMENTATION.kind == 'enum' and #sc.FSR.OLD_IMPLEMENTATION.options == 3, 'enum with commas in quotes')
+  assert(sc.RENDER_SCALE.SCALE.min == 0.1 and sc.LODS.TRACK_DISTANCE_MULT.min == 0.2, 'decimal minimums')
+  assert(sc.ANTIALIASING.MODE.options[3].label == 'CMAA 2.0' and sc.ANTIALIASING.QUALITY.options[3].value == 'ULTRA', 'curly quotes / X or Y')
+  local ls = C.parseSchema(SCHEMA.lighting_fx)
+  assert(ls.SHADOWS.CARS_SHADOWS.max == 5 and ls.PERFORMANCE.CARS_WITH_LIGHTS.max == 50, 'round / unit ranges')
+  assert(C.parseSchema(SCHEMA.smart_shadows).BASIC.AUTOMATIC_SPLITS_DISTANCE.unit == 'm', 'unit')
   print('schema parser: OK')
 end
 
 -- ---------------------------------------------------------------------------------------------- load the app
 script = {}
-dofile('app/Pitwall/Pitwall.lua')
-assert(type(script.windowMain) == 'function', 'windowMain not defined')
-assert(type(hud) == 'function', 'app did not register ui.onExclusiveHUD')
-local store = storages[1]
-assert(store and store.enabled ~= nil and store.page, 'main storage not found')
-
-local function frame()
-  log.updates, log.finals = {}, {}
-  hud('game')
-  assert(#log.errors == 0, 'app reported: ' .. table.concat(log.errors, '; '))
-  return log.updates, log.finals[#log.finals]
+dofile('app/Lumicorsa/Lumicorsa.lua')
+assert(hud and script.windowDashboard and script.windowHud, 'callbacks not registered')
+local R = require('backend/registry')
+local St = storages[1]
+local verify = require('backend/verify')
+local function frame(n)   -- one game frame: the HUD callback, then the visible app windows, then timers
+  for _ = 1, n or 1 do
+    now = now + 1 / 60; hud('game')
+    if WINDOWS.IMGUI_LUA_Lumicorsa_hud and WINDOWS.IMGUI_LUA_Lumicorsa_hud.vis then script.windowHud(1 / 60) end
+    for _, f in ipairs(timeouts) do f() end; timeouts = {}
+  end
 end
-local function has(list, pattern) for _, n in ipairs(list) do if n:find(pattern) then return true end end return false end
+local function check(where) if #log.errors > 0 then fail(where .. ': ' .. table.concat(log.errors, '\n')) end end
+frame(3); check('first frames')
+print(string.format('registry: %d controls', #R.all))
 
--- ---------------------------------------------------------------------------------------------- 2-3. passes
-local u, f = frame()
-assert(f, 'engaged frame drew nothing')
-for _, want in ipairs({ 'Neural, layer 0', 'Neural, layer 3', 'Bloom prefilter', '1x1 probe', 'Sun shafts, step 2', 'Contact ambient occlusion', 'Clarity source' }) do
-  assert(has(u, want), 'missing pass: ' .. want)
+-- 2. look passes ran with valid bindings
+assert(#log.passes > 10, 'look passes did not run')
+print('look passes: ' .. #log.passes .. ' offscreen passes validated')
+
+-- 3. every tab, every mode, then click everything per tab
+local tabs = require('ui/tabs')
+for _, mode in ipairs({ 'Basic', 'Advanced', 'Expert' }) do
+  St.mode = mode
+  for _, t in ipairs(tabs.ORDER) do St.tab = t; script.windowDashboard(1 / 60); check(mode .. '/' .. t) end
 end
-assert(not has(u, 'Lens flare'), 'flare is off by default')
-assert(f.values.gPLShaftsOn == 1 and f.values.gPLAOOn == 1 and f.values.gPLDofOn == 0, 'add-on flags')
-print('passes with defaults: ' .. #u .. ' + final')
-
-store.flare = true; u, f = frame(); assert(has(u, 'Lens flare') and f.values.gPLFlareOn == 1, 'flare on'); store.flare = false
-store.dof = 2; u, f = frame(); assert(has(u, 'Depth of field source') and f.values.gPLDofOn == 1, 'dof always'); store.dof = 0
-store.dof = 1; u, f = frame(); assert(f.values.gPLDofOn == 0, 'dof replays-only stays off while driving')
-SIM.isReplayActive = true; u, f = frame(); assert(f.values.gPLDofOn == 1, 'dof on in replays'); SIM.isReplayActive = false; store.dof = 0
-store.neural = false; u, f = frame(); assert(f.base == 'dynamic::screen' and not has(u, 'Neural'), 'neural off'); store.neural = true
-store.light = false; u, f = frame(); assert(f.values.gPLLight == 0 and not has(u, 'Bloom') and not has(u, 'Sun shafts'), 'light off'); store.light = true
-store.detail = false; u, f = frame(); assert(f.values.gPLDetail == 0 and not has(u, 'Clarity'), 'detail off'); store.detail = true
-store.ao = false; u, f = frame(); assert(f.values.gPLAOOn == 0 and not has(u, 'Contact'), 'ao off'); store.ao = true
-store.split = true; u, f = frame(); assert(f.values.gPLSplit == 1, 'split'); store.split = false
-store.enabled = false; u, f = frame(); assert(#u == 0 and f == nil, 'bypass must draw nothing')
-buttons.__APP_PITWALL_MASTER(); u, f = frame(); assert(store.enabled and f, 'Alt+O re-engages')
-ac._windows = { { name = 'IMGUI_LUA_DreamRealism74_dpm_main' } }
-for _, fn in ipairs(intervals) do fn() end
-u, f = frame(); assert(f.values.PL_FilmicStrength == 0 and f.values.PL_HighlightRecover == 0, 'other grading app: no re-tonemap')
-ac._windows = { { name = 'IMGUI_LUA_Dream_DriverSwap_main' } }
-for _, fn in ipairs(intervals) do fn() end
-u, f = frame(); assert(f.values.PL_FilmicStrength > 0, 'unrelated Dream_* app is not a grading app')
-print('pass graph: OK')
-
--- ---------------------------------------------------------------------------------------------- 4. pages
-local function drawPage(page, clickAll)
-  store.page = page
-  log.texts = {}
-  clickFilter = clickAll and function (id) return id:sub(1, #page + 1) == page .. '_' end or function () return false end
-  script.windowMain(0.016)
-  script.windowMain(0.016)
+St.mode = 'Expert'
+for _, t in ipairs(tabs.ORDER) do
+  St.tab = t
+  clickFilter = function (id) return not id:find('^hdr_') and not id:find('^tab_') and not id:find('reset$') and not id:find('^modal') end
+  script.windowDashboard(1 / 60); frame(1)
   clickFilter = function () return false end
-  local all = table.concat(log.texts, '\n')
-  assert(not all:find('ERROR', 1, true), page .. ': page builder failed:\n' .. all)
-  assert(#log.errors == 0, page .. ': ' .. table.concat(log.errors, '; '))
-  return all
+  St.tab = t; require('ui/dashboard').modal = nil
+  script.windowDashboard(1 / 60); frame(1)
+  check('click all on ' .. t)
 end
+St.master = true
+print('dashboard: all tabs in all modes, every control clicked: OK')
 
-local P = require('src/pages')
-for _, item in ipairs(P.nav) do drawPage(item.id, false) end
-for _, tab in ipairs({ 'upscale', 'light', 'effects', 'detail' }) do store.gfxTab = tab; drawPage('graphics', false) end
-local look = drawPage('look', false)
-assert(look:find('running', 1, true) and look:find('DLSS', 1, true), 'status card: shaders running + upscaler')
-local realism = drawPage('realism', false)
-assert(not realism:find('DLSS 5', 1, true), 'neural must not be called DLSS 5')
+-- 4. HUD
+for _, u in ipairs({ 'km/h', 'mph' }) do St.units = u; St.hudOn = true; script.windowHud(1 / 60); frame(1); check('hud ' .. u) end
+assert(require('hud/cluster').last.units == 'mph', 'cluster drew with mph')
 
--- click every control on every page; then let debounced writes settle
-log.writes = {}
-for _, item in ipairs(P.nav) do
-  if item.id == 'graphics' then
-    for _, tab in ipairs({ 'upscale', 'light', 'effects', 'detail' }) do store.gfxTab = tab; drawPage('graphics', true) end
-  elseif item.id == 'effects' then
-    for _, tab in ipairs({ 'light', 'lens' }) do store.fxTab = tab; drawPage('effects', true) end
-  else drawPage(item.id, true) end
-end
-now = now + 1
-S.flush()
-for _, fn in ipairs(timeouts) do fn() end
+-- 5. debounce: a slider write waits for 250 ms
+local d = R.get('shdist')
+d.set(250)
+assert(FILES['X/cfg/extension/smart_shadows.ini'] == nil or (FILES['X/cfg/extension/smart_shadows.ini'].BASIC or {}).AUTOMATIC_SPLITS_DISTANCE ~= 250, 'written before debounce')
+frame(30)
+assert(FILES['X/cfg/extension/smart_shadows.ini'].BASIC.AUTOMATIC_SPLITS_DISTANCE == 250, 'not written after debounce')
+print('debounce: OK')
 
-assert(wrote('csp:extra_fx', 'SSLR', 'ENABLED'), 'graphics: SSLR toggle wrote extra_fx')
-assert(wrote('csp:graphics_adjustments', 'FSR', 'ACTIVE'), 'graphics: upscaler toggle wrote graphics_adjustments')
-assert(wrote('csp:smart_shadows', 'BASIC', 'AUTOMATIC_SPLITS_DISTANCE'), 'graphics: shadow slider saved after settling')
-assert(wrote('csp:grass_fx', 'BASIC', 'QUALITY'), 'graphics: grass quality')
-assert(wrote('csp:extra_fx', 'ASSAO', 'ENABLED'), 'graphics: AO mode writes all three AO switches')
-assert(wrote('csp:weather_fx', 'MISCELLANEOUS', 'FORCE_HEADLIGHTS'), 'weather: WeatherFX toggle')
-assert(wrote('csp:rain_fx', 'SCREEN_DROPS', 'ENABLED'), 'weather: rain toggle')
-assert(wrote('timeOffset') and wrote('timeSpeed'), 'weather: time controls (offline)')
-assert(wrote('video', 'POST_PROCESS', 'FILTER'), 'filters: AC filter written to video.ini')
-assert(wrote('video', 'POST_PROCESS', 'GLARE'), 'filters: glare level')
-assert(wrote('csp:graphics_adjustments', 'SCRIPTABLE_FILTER', 'IMPLEMENTATION'), 'filters: CSP Lua filter script')
-assert(wrote('video', 'ASSETTOCORSA', 'WORLD_DETAIL') and wrote('video', 'MIRROR', 'HQ'), 'video: video.ini settings')
-assert(wrote('fov') and wrote('fovReset'), 'video: field of view live')
-assert(wrote('audio', 'engine', false) and wrote('audio', 'engine', true), 'audio: live while dragging, saved once settled')
-assert(wrote('csp:weather_fx', 'BASIC', 'IMPLEMENTATION'), 'pure: style switch / reload')
-assert(wrote('file:X/cfg/extension/state/lua/wfx_impl/pure__settings.ini:save'), 'pure: style option saved')
-assert(wrote('window', 'IMGUI_LUA_PureConfig_main_pure_config'), 'pure: opens Pure Config')
-print('pages: OK (' .. #log.writes .. ' writes across all pages)')
+-- 6. palette
+local pal = require('ui/palette')
+local found = false
+for _, e in ipairs(R.all) do if e.tab and pal.score('bloom', e.label) then found = true end end
+assert(found, 'palette cannot find bloom')
+assert(pal.score('rscl', 'Render scale') ~= nil, 'fuzzy subsequence')
 
--- online: time controls are locked
+-- 7. quick ring: hold Q, release fires the hovered item
+local qb = buttons['__APP_LUMICORSA_RING#obj']
+qb.isDown = true; frame(2); qb.isDown = false; frame(1); check('quick ring')
+
+-- 8. self-test over every control
+verify.selftest(require('backend/verify').__env or nil)
+for _ = 1, 6000 do frame(1); if not verify.running then break end end
+check('self-test')
+local logText = io.load('app/Lumicorsa/selftest.log')
+assert(logText, 'selftest.log not written')
+local fails = {}
+for line in logText:gmatch('[^\r\n]+') do if line:find('^FAIL') then fails[#fails + 1] = line end end
+print(logText:match('(%d+ PASS, %d+ FAIL, %d+ LOCKED[^\r\n]*)'))
+assert(#fails == 0, 'self-test failures:\n' .. table.concat(fails, '\n'))
+
+-- 9. proof and a short online soak
+verify.proof(require('backend/verify').__env)
+for _ = 1, 6000 do frame(1); if not verify.running then break end end
+assert(log.shots >= 15, 'proof screenshots: ' .. log.shots)
 SIM.isOnlineRace = true
-log.writes = {}
-drawPage('weather', true)
-assert(not wrote('timeOffset') and not wrote('timeSpeed'), 'online: no time changes')
-SIM.isOnlineRace = false
-
+verify.soak(require('backend/verify').__env, 4, 2)
+for _ = 1, 2000 do frame(1); if not verify.running then break end end
+local soak = io.load('app/Lumicorsa/soak.log')
+assert(soak and soak:find('RESULT: PASS'), 'soak: ' .. tostring(soak))
+check('verification')
+print('proof (' .. log.shots .. ' shots) and soak: OK')
 print('lua mock test: OK')

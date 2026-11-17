@@ -14,7 +14,7 @@ Windows only (needs d3dcompiler_47.dll). usage: hlslcheck.py [shader_dir]
 import ctypes, pathlib, re, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
-SHADERS = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'app/Pitwall/shaders'
+SHADERS = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'app/Lumicorsa/shaders'
 
 STUB = '''
 SamplerState samLinear : register(s0);

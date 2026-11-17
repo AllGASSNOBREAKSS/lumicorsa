@@ -2,3 +2,6 @@ dist/
 bin/
 *.tmp
 __pycache__/
+app/Lumicorsa/selftest.log
+app/Lumicorsa/soak.log
+app/Lumicorsa/autorun.*
