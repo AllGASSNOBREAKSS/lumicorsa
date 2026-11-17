@@ -1,7 +1,4 @@
-tools/fxcheck/fxcheck
 dist/
-legacy/reshade/addon/build/
-*.tmp
-csp-app/Photolap/state/
 bin/
+*.tmp
 __pycache__/

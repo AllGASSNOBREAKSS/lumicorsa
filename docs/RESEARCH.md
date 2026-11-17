@@ -1,5 +1,7 @@
 # Research: the Assetto Corsa graphics stack, and where DLSS 5 fits
 
+> Pitwall was called **Photolap** up to v0.2. This file records the research behind it; names below are historical.
+
 ## 1. The stack, bottom to top
 
 **Assetto Corsa (Kunos, 2014).** A 64-bit DirectX 11 game. Its original post-processing is YEBIS, and the engine has no upscaler or motion vectors of its own.

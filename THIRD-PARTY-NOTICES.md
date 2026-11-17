@@ -1,12 +1,11 @@
 # Third-party notices
 
-## Shipped in the CSP app (`csp-app/Photolap`)
-
 | Component | Where | Licence |
 |---|---|---|
-| Anime4K v4 "Restore CNN Soft (S)" weights (bloc97) | `csp-app/Photolap/shaders/nn_0.hlsl` … `nn_3.hlsl`, generated from `glsl/Restore/Anime4K_Restore_CNN_Soft_S.glsl` by `tools/anime4k_to_hlsl.py` | MIT, allows commercial use (text below) |
+| Space Grotesk (The Space Grotesk Project Authors) | `app/Pitwall/fonts/SpaceGrotesk-*.ttf` | SIL Open Font License 1.1, see `app/Pitwall/fonts/OFL.txt` |
+| Anime4K v4 "Restore CNN Soft (S)" weights (bloc97) | `app/Pitwall/shaders/nn_0.hlsl` … `nn_3.hlsl`, generated from `glsl/Restore/Anime4K_Restore_CNN_Soft_S.glsl` by `tools/anime4k_to_hlsl.py` | MIT (text below) |
 
-Photolap Neural uses these pretrained weights unchanged. Photolap applies the network's residual in the opposite direction, with a gain and a clamp, as a learned detail enhancer.
+Pitwall Neural uses the Anime4K weights unchanged. Pitwall applies the network's residual in the opposite direction, with a gain and a clamp, as a learned detail enhancer. Source: https://github.com/bloc97/Anime4K (commit 7684e95).
 
 ```
 MIT License
@@ -33,20 +32,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-Source: https://github.com/bloc97/Anime4K (commit 7684e95).
-
-## Legacy ReShade path and build tools (not shipped in the CSP app)
-
-| Component | Where | Licence |
-|---|---|---|
-| ReShade add-on headers (crosire) | `third_party/reshade/include` | BSD 3-Clause, see `third_party/reshade/LICENSE.md` |
-| Dear ImGui header (Omar Cornut) | `third_party/imgui` | MIT, see `third_party/imgui/LICENSE.txt` |
-| ReShade effect compiler (crosire) | used by `tools/fxcheck` at build time only, not shipped | BSD 3-Clause |
-| DLSS5-Feeder (Jean-Laurent ROUZIES) | `legacy/reshade/addon/src/renodx_bridge.hpp` is adapted from `src/feed_renodx_api.h`; submodule `vendor/DLSS5-Feeder` | MIT |
-| DLSS5oneclick (Faisal Bahashwan) | submodule `vendor/DLSS5oneclick` (reference only) | MIT |
-| dlss5-visual-enhancer (Merserk) | submodule `vendor/dlss5-visual-enhancer` (reference only, no code copied) | Merserk Source License |
-| DLSS 5 MANAGER (NODIX-TECH) | submodule `vendor/DLSS-5-MANAGER` (reference only, no code copied) | Copyright NODIX-TECH |
-
-NVIDIA, DLSS and RTX are trademarks of NVIDIA Corporation. Assetto Corsa is a trademark of Kunos Simulazioni.
-Photolap is not affiliated with or endorsed by NVIDIA, Kunos Simulazioni, or the Custom Shaders Patch authors.
-No NVIDIA binaries are included in this repository.
+Pitwall works with, but doesn't include, Custom Shaders Patch, Content Manager and Pure. Pure's apps are opened, not copied.
+NVIDIA and DLSS are trademarks of NVIDIA Corporation. Assetto Corsa is a trademark of Kunos Simulazioni.
+Pitwall is not affiliated with NVIDIA, Kunos Simulazioni, the CSP authors or the Pure author.

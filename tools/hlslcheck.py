@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compiles every CSP Lua-app shader in csp-app/Photolap/shaders with the Windows HLSL compiler (d3dcompiler_47, ps_5_0).
+"""Compiles every CSP Lua-app shader in app/Pitwall/shaders with the Windows HLSL compiler (d3dcompiler_47, ps_5_0).
 
 CSP wraps `shader` code in its own template (extension/internal/shader-tpl/ui.fx, built into dwrite.dll): it declares a
 Texture2D per `textures` key, a cbuffer entry per `values` key, the shared samplers and `struct PS_IN`. A compile error in
@@ -14,7 +14,7 @@ Windows only (needs d3dcompiler_47.dll). usage: hlslcheck.py [shader_dir]
 import ctypes, pathlib, re, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
-SHADERS = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'csp-app/Photolap/shaders'
+SHADERS = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / 'app/Pitwall/shaders'
 
 STUB = '''
 SamplerState samLinear : register(s0);

@@ -1,65 +1,80 @@
-# Architecture (v0.2, native CSP)
+# Architecture
 
-Photolap is one CSP Lua app: `csp-app/Photolap`. It runs no ReShade, loads no DLL and exchanges no files with another process.
+Pitwall is one CSP Lua app in `app/Pitwall`. It uses no ReShade and no DLL.
 
 ```
-Photolap.lua      panel (presets, toggles, sliders, status), hotkeys, persistence (ac.storage)
-pl_pipeline.lua   render targets, pass graph, environment probes (upscaler, other PP apps, GPU time)
-shaders/*.hlsl    pixel shaders; CSP compiles them at runtime inside its UI shader template
+Pitwall.lua         window (header, nav rail, page, footer), presets, state, hotkeys, HUD hook
+src/pipeline.lua    render targets and the shader pass graph; upscaler / other-app / GPU-time probes
+src/settings.lua    bridge to CSP module configs, AC video.ini, audio, weather time, Pure; CSP schema parser
+src/pages.lua       the ten pages as declarative cards and rows
+src/ui_kit.lua      glass background, Space Grotesk text, widgets (toggle, slider, choice, buttons, info, note)
+shaders/*.hlsl      pixel shaders; CSP compiles them at runtime inside its UI shader template
+fonts/, icon.png
 ```
 
-## Frame timeline
+## Drawing the look
 
-1. CSP renders the scene, runs its HDR post-processing (YEBIS or the WeatherFX style's own, e.g. Pure), then the upscaler (DLSS / FSR / XeSS if enabled). The result is the LDR frame CSP exposes as `dynamic::screen`, plus `dynamic::depth`.
-2. **`ui.onExclusiveHUD`** fires. It's the first UI callback of the frame, so Photolap runs here:
-   - offscreen passes into `ui.ExtraCanvas` targets (RGBA16F) through `canvas:updateWithShader()`;
-   - one fullscreen `ui.renderShader()` (opaque) that writes the graded frame over the screen.
-3. AC's HUD, chat, leaderboards and every app window, the Photolap panel included, draw on top, ungraded.
-
-When the panel is BYPASSED, the callback returns without drawing anything, so the vanilla image is back in the same frame.
-
-## Pass graph
+`ui.onExclusiveHUD` is the first UI callback of the frame. Pitwall renders its offscreen passes there into
+`ui.ExtraCanvas` targets (RGBA16F), then draws one fullscreen opaque `ui.renderShader`. That lands after the finished
+scene (CSP post-processing and upscaler included) and before AC's HUD and every app window. Inputs are
+`dynamic::screen` and `dynamic::depth`. Bypassed means nothing is drawn at all.
 
 | Pass | Shader | Size | Runs when |
 |---|---|---|---|
-| Neural layer 0..3 | `nn_0..3.hlsl` | full | Neural on and intensity > 0 |
-| Bloom prefilter | `bloom_prefilter.hlsl` | 1/2 | Light on and (bloom or halation > 0) |
-| Bloom down ×4 | `bloom_down.hlsl` | 1/4 … 1/32 | same |
-| Bloom up ×4 | `bloom_up.hlsl` | 1/16 … 1/2 | same |
-| Clarity luma + blur H/V | `luma_quarter.hlsl`, `blur9.hlsl` | 1/4 | Detail on and clarity > 0 |
-| Depth probe | `depth_probe.hlsl` | 1×1 | Atmosphere on |
-| Final composite | `final.hlsl` | screen | always (when engaged) |
+| Neural ×4 | `nn_0..3` | full | Neural on |
+| Depth probe | `depth_probe` | 1×1 | haze, AO, shafts or DoF on |
+| Bloom prefilter, down ×4, up ×4 | `bloom_*` | 1/2 … 1/32 | Light on with bloom or halation |
+| Lens flare | `flare` | 1/4 | Light + flare on |
+| Sun shafts ×2 | `shafts_mask`, `shafts_blur` | 1/2 | Light + shafts on and the sun is on screen |
+| Contact AO + blur | `ao`, `blur9` | 1/2 | AO on |
+| Clarity | `luma_quarter`, `blur9` | 1/4 | Detail + clarity on |
+| DoF background | `color_quarter`, `blur9c` | 1/4 | DoF on (always / replays) |
+| Final | `final` | screen | engaged |
 
-With everything on, that's 17 offscreen passes plus the final one. All but the neural layers run at reduced resolution.
+The final pass runs Detail, then DoF, then lens CA. In linear light it applies AO, then Light (inverse tonemap,
+exposure, white balance, bloom, halation, shafts, flare, filmic, grade), then haze. Last come vignette, grain,
+and the mix/split.
 
-`final.hlsl`, per pixel: **Detail** (contrast-adaptive sharpen + clarity) → **Lens CA** (offsets R and B before the "sensor") → **Light** (inverse tonemap, exposure, white balance, bloom + halation, filmic, grade) → **Atmosphere** (haze) → **vignette + grain** → **Mix** against the original. The split view returns the original frame on the left half, with a divider line.
+- **Depth.** The probe picks the depth convention (standard or reversed) on the GPU. Distances are metres from
+  `cameraClipNear/Far`.
+- **AO.** Uses depth only, with pairs of opposite samples in inverse depth. Inverse depth is linear across any plane,
+  so roads and walls at a grazing angle don't turn grey; only creases darken.
+- **Neural.** Anime4K Restore CNN Soft (S), about 1,000 MIT weights, converted by `tools/anime4k_to_hlsl.py`. On game
+  frames the net's residual is an edge-aware smoothing step, so Pitwall subtracts it as a learned unsharp mask
+  (gain = intensity × 3.5, per-pixel clamp).
+- **Other grading apps.** Dream Realism and ExilitayFX are detected through `ac.getAppWindows()`. Pitwall stays on top
+  but drops its inverse tonemap and filmic curve.
 
-## Photolap Neural
+## Settings bridge
 
-Four 3×3 convolution layers with CReLU between them, taken unchanged from Anime4K v4 *Restore CNN Soft (S)* (MIT). That's about 1,000 weights. `tools/anime4k_to_hlsl.py` converts the GLSL: GLSL `mat4(a0..a15) * v` fills columns, which is HLSL `mul(v, float4x4(a0..a15))` filling rows, so weights are copied in file order. Each layer reads one RGBA16F target and writes the next.
+| Source | API | When it applies |
+|---|---|---|
+| CSP modules (`cfg/extension/<module>.ini`) | `ac.INIConfig.cspModule(id)`, `:setAndSave()` | live (CSP reloads the module), or restart where marked |
+| Control types | parsed from `extension/config/<module>.ini`, CSP's schema (same as CM) | — |
+| AC video settings (`cfg/video.ini`) | `ac.INIConfig.videoConfig()` | next launch |
+| Audio | `ac.getAudioVolume` / `ac.setAudioVolume` | live, saved once a slider settles |
+| Time of day / speed | `ac.setWeatherTimeOffset` / `ac.setWeatherTimeMultiplier` | live, offline only |
+| Field of view | `ac.setFirstPersonCameraFOV` | live |
+| Pure | WeatherFX config, style options in `cfg/extension/state/lua/wfx_impl/<style>__settings.ini`, Pure's own app windows | live, or on weather reload |
 
-On game frames the restore net's residual is a small, edge-aware smoothing step. Photolap applies it in reverse as a learned unsharp mask: `out = in − clamp(gain · residual, ±0.12)`, with gain = intensity × 3.5. Detail rises where the network sees structure, and the clamp keeps halos down. The checks behind this are in `RESEARCH.md` §6.
+- **Debounced writes.** Slider writes wait until the value has been still for about 0.35 s, so a drag doesn't make CSP
+  reload a module every frame.
+- **Staying in sync with CM.** `ac.onCSPConfigChanged` and `ac.onFileChanged` drop cached configs, so CM edits show up
+  in Pitwall.
 
-## Depth and haze
+## UI
 
-`dynamic::depth` is non-linear. The 1×1 probe averages the raw depth over an 8×8 grid. With standard depth almost every pixel is above 0.5 (anything beyond twice the near plane), and with reversed depth almost every pixel is below it, so the final pass picks the right convention by itself. With `zz` defined as 0 at the far plane for both conventions, distance in metres is `n·f / (n + zz·(f − n))`, using `cameraClipNear/Far` from `ac.getSim()`. The skybox (`zz ≈ 0`) is never hazed.
-
-## Coexisting with other post-processing apps
-
-Apps such as Dream Realism change CSP's own HDR pipeline (exposure, bloom, tonemapping) and add PNG overlays, so their look is already in `dynamic::screen`. Photolap sits on top of that. When one is detected (`ac.getAppWindows()`), Photolap drops its inverse tonemap and filmic curve, the parts that would tonemap a second time, and lowers the bloom threshold to match. Detail, grade, haze and lens still apply. *Advanced › Compatibility* overrides this.
-
-## Status read-back
-
-- **Shaders:** `running` once every pass has compiled and drawn (passes compile asynchronously on first use, shown as `compiling…`).
-- **GPU cost:** the smoothed GPU frame time from `ac.getPerformanceCPUAndGPUTime()` while engaged, minus the same while bypassed.
-- **Upscaler:** CSP's `[FSR] ACTIVE / OLD_IMPLEMENTATION` from the Graphics adjustments config, combined with `upscaleAppliedFactor` and `isTAAActive` from `ac.getSim()`.
+The window is a portrait 540×900, with no title bar, no IMGUI background and no scrollbar. `glass.hlsl` blurs the frame
+behind the window, tints it and adds a sheen, a hairline border and rounded corners. All text is DWrite
+Space Grotesk. Pages scroll with the mouse wheel when they overflow, and rows outside the view are neither drawn nor
+clickable. A ten-item nav rail (icons in blue, orange, yellow, green and red) switches pages. Graphics and Effects have
+section switches, so every page fits without scrolling at the default size.
 
 ## Checks
 
-- `tools/hlslcheck.py`: compiles every shader with `d3dcompiler_47` (ps_5_0) against a stub of CSP's template, built from each file's `// @textures` and `// @values` header. A shader that fails to compile in game halts the Lua script, so this runs in CI on Windows.
-- `tools/lua_mock_test.lua`: runs the app under LuaJIT with a stubbed CSP API, checks every pass's bound textures and values against the shader header (names and types), and flips every toggle.
-- `tools/check_consistency.py`: panel keys ⊆ `final.hlsl` values ⊆ legacy `Photolap.fx` uniforms, and every shader is loaded.
-
-## Legacy ReShade path
-
-`legacy/reshade` keeps the v0.1 `Photolap.fx` + `photolap.addon64` and their installer. They're optional and never installed by default. The 0.2 panel doesn't drive them, so on that path the effects are tuned in ReShade's overlay.
+- `tools/hlslcheck.py` compiles every shader with `d3dcompiler_47` against a stub of CSP's template, built from each
+  file's `// @textures` / `// @values` header.
+- `tools/lua_mock_test.lua` runs the whole app under LuaJIT with a stubbed CSP. It checks every pass against its
+  shader header and every toggle's pass graph, clicks every control on every page, and confirms where each write lands.
+- `tools/check_consistency.py` checks that panel keys match `final.hlsl`, that every shader is used, and that the
+  fonts and icon ship.
