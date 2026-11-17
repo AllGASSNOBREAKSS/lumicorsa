@@ -1,0 +1,6 @@
+tools/fxcheck/fxcheck
+dist/
+addon/build/
+*.tmp
+csp-app/Photolap/state/
+bin/

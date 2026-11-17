@@ -1,0 +1,12 @@
+[submodule "vendor/DLSS5-Feeder"]
+	path = vendor/DLSS5-Feeder
+	url = https://github.com/jlrouzies-fr/DLSS5-Feeder
+[submodule "vendor/DLSS5oneclick"]
+	path = vendor/DLSS5oneclick
+	url = https://github.com/faisalkindi/DLSS5oneclick
+[submodule "vendor/dlss5-visual-enhancer"]
+	path = vendor/dlss5-visual-enhancer
+	url = https://github.com/Merserk/dlss5-visual-enhancer
+[submodule "vendor/DLSS-5-MANAGER"]
+	path = vendor/DLSS-5-MANAGER
+	url = https://github.com/NODIX-TECH/DLSS-5-MANAGER

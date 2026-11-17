@@ -1,0 +1,20 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq g++-mingw-w64-x86-64 luajit zip
+      - name: ReShade effect compiler (pinned)
+        run: |
+          git clone -q https://github.com/crosire/reshade.git ../ref/reshade-src
+          git -C ../ref/reshade-src checkout -q 7bf9de8b33bcc76c3177007e65d73c72dd0f34c0
+          git -C ../ref/reshade-src submodule update --init --depth 1 deps/spirv
+      - name: Check shaders, Lua app, cross-layer consistency; build add-on
+        run: make all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photolap-addon64
+          path: bin/photolap.addon64
