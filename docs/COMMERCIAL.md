@@ -22,6 +22,6 @@ These are product notes, not legal advice. Have a lawyer review this before laun
 
 ## Risks to resolve before charging
 
-1. The neural pass depends on a third-party leaked model, so it can disappear overnight. Sell the post stack plus HUD-safe plus the panel as the core value, and market the neural pass as "supported when present".
-2. CSP or ReShade updates can break the HUD-safe draw index. Ship it with an in-panel calibrator and remote-updatable defaults.
-3. Online servers: ReShade and CSP apps are allowed on No Hesi today. Confirm with the big server owners, and keep the Alt+O bypass prominent.
+1. Resolved in v0.2: the neural pass is now Photolap Neural, with MIT-licensed Anime4K weights shipped in our own shaders (keep the notice). Never market it as DLSS or NVIDIA.
+2. CSP updates can change the Lua shader template or the `dynamic::` textures. Keep `tools/hlslcheck.py` in CI and re-test on each CSP preview.
+3. Online servers: CSP Lua apps are allowed on No Hesi today. Confirm with the big server owners, and keep the Alt+O bypass prominent.

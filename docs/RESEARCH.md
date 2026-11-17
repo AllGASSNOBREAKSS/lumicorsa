@@ -25,7 +25,7 @@
 
 | Repo | What it is | Licence | Role in Photolap |
 |---|---|---|---|
-| **jlrouzies-fr/DLSS5-Feeder** | ReShade add-on (C++) that *creates* a DLSS session for games without DLSS. It estimates motion vectors in a shader, feeds NGX, and has an Alt+C ImGui panel that drives RenoDX / OptiScaler | MIT | **Code integrated:** the RenoDX live-control interface (`addon/src/renodx_bridge.hpp` is adapted from `feed_renodx_api.h`). Its panel design and HUD/overlay techniques informed ours. Its estimated-MV path is **not needed for AC**, because CSP provides real DLSS. |
+| **jlrouzies-fr/DLSS5-Feeder** | ReShade add-on (C++) that *creates* a DLSS session for games without DLSS. It estimates motion vectors in a shader, feeds NGX, and has an Alt+C ImGui panel that drives RenoDX / OptiScaler | MIT | **Code integrated:** the RenoDX live-control interface (`legacy/reshade/addon/src/renodx_bridge.hpp` is adapted from `feed_renodx_api.h`). Its panel design and HUD/overlay techniques informed ours. Its estimated-MV path is **not needed for AC**, because CSP provides real DLSS. |
 | **faisalkindi/DLSS5oneclick** | Rust GUI that picks and installs the right DLSS 5 setup per game (ReShade + RenoDX + model, with fallbacks), detects the API, and keeps builds updated | MIT | Its decision logic confirms the AC path: AC (with CSP) "ships its own DLSS", so the setup is ReShade + RenoDX DLSS 5 add-on, with no Feeder. Our installer follows the same ReShade setup-zip extraction approach. |
 | **Merserk/dlss5-visual-enhancer** | Qt/QML desktop app for *offline* image and video enhancement (DLSS 5 "Neuroframe", RTX Video, FSR/DLSS FG, ReShade, NIS/CAS) | Merserk Source License (all rights reserved) | Not a real-time in-game path. It is useful for **marketing**, as a before/after renderer for screenshots and clips. Kept as a submodule reference only. |
 | **NODIX-TECH/DLSS-5-MANAGER** | F#/Avalonia manager and one-click installer for DLSS 5 / ReShade / OptiScaler, with obfuscated build tooling | Copyright NODIX-TECH (all rights reserved) | Generic installer UI with nothing AC-specific. Kept as a submodule reference. Its UX ideas could feed a future CM-side companion. |
@@ -40,10 +40,34 @@ Other confirmed facts:
 2. **In-game UI as a CSP Lua app.** It shows in every CM-launched session, including No Hesi, gets a native AC look and apps-bar entry, and has rebindable hotkeys through `ac.ControlButton`. The add-on's ReShade panel is the fallback.
 3. **IPC through two small INI files**, polled at about 150 ms with an atomic temp-and-rename write. That is far simpler and more robust than shared memory across the Lua sandbox, and it can't crash the game.
 4. **Our own post stack in one standalone `.fx`.** It has no ReShade.fxh dependency, uses manual sRGB so it renders correctly mid-frame on AC's UNORM back buffer, and keeps every parameter live-controllable.
-5. **Ship no NVIDIA binaries.** See `NEURAL-SETUP.md` and `COMMERCIAL.md`.
+5. **Ship no NVIDIA binaries.** See `NEURAL.md` and `COMMERCIAL.md`.
+
+Decisions 1–4 describe v0.1. Section 6 replaces them.
 
 ## 5. Roadmap
 
-- **v0.2, live validation.** Calibrate HUD-safe on current CSP builds, set depth orientation defaults, check the CSP window name, and add a performance HUD.
-- **v0.3, "Photolap Native".** Port Light / Atmosphere / Detail / Lens to a **CSP Lua post-processing filter** (`ac_pp_filters` + `ui.renderShader`). That removes the ReShade dependency for the non-neural stack, works wherever CSP works (including VR), and can read CSP's own HDR buffer before tonemapping, which beats inverse-tonemapping the LDR frame.
-- **v0.4.** Per-track and per-time-of-day auto presets driven by CSP's weather and sun API, wet-road and rain tuning, and a night-highway profile for No Hesi.
+- **v0.2, native (done).** The ReShade dependency is gone; see §6.
+- **v0.3.** Per-track and per-time-of-day auto presets driven by CSP's weather and sun API, wet-road and rain tuning, a night-highway profile for No Hesi, and HDR-output support.
+
+## 6. v0.2: going native in CSP
+
+**Why.** In v0.1 the panel loaded but showed "Add-on: not running, Effects: missing": ReShade never loaded in the user's setup, so nothing rendered. Depending on a DLL injector that other mods also compete for (dxgi.dll) was the weak link. v0.2 needs only Content Manager + CSP.
+
+**What CSP offers** (read from the SDK bundled with CSP 0.3.0-preview728, `extension/internal/lua-sdk`, and the public `acc-lua-sdk`):
+
+| Option | How it draws | Verdict |
+|---|---|---|
+| Lua **PP filter** (`extension/lua/pp-filters/*`, `render.fullscreenPass`, `ac.setDirectPass`) | Replaces CSP's scriptable LDR filter stage | Only one filter can be active, selected globally in CSP settings, and it would collide with filters users already run (Pure's included). It's also installed outside `apps/lua`. **Not used.** |
+| `ac.setColorCorrection()` | Tweaks YEBIS/WeatherFX colour matrices | Cheap, but it's colour only: no bloom, haze, sharpening or neural pass. **Not enough.** |
+| Lua **app** + `ui.onExclusiveHUD` + `ui.renderShader` reading `dynamic::screen` / `dynamic::depth`, with `ui.ExtraCanvas:updateWithShader` for intermediate passes | Fullscreen quad in the first UI callback: after the finished scene (post-processing and upscaler), before AC's HUD and all apps | Self-contained in `apps/lua/Photolap`, live-controllable from the same script, HUD-safe by construction, and Lua apps run in every CM-launched session, online included (the user's No Hesi setup already runs several). **Chosen.** |
+
+**Caveats found in the docs.** `dynamic::` textures need CSP's Graphics adjustments module (on by default), which the panel checks. A shader that fails to compile halts the script, so every shader is compile-checked in CI against a stub of CSP's template. CSP compiles asynchronously (`async = true`), so the first frames after loading show `compiling…` instead of stalling the game.
+
+**Upscaling.** CSP already integrates DLSS, FSR 1/2/3/4, XeSS, NIS and SGSR (`[FSR] OLD_IMPLEMENTATION` in `graphics_adjustments.ini`), so Photolap reports that state instead of shipping its own.
+
+**Neural pass.** The goal was a small pretrained CNN under a licence that allows commercial use. Anime4K (MIT) has compact restore networks in plain GLSL. A pure-Python reference run of *Restore CNN Soft (S)* on crops from a No Hesi screenshot gave these results:
+- the parsed weight orientation produces a coherent residual (|correlation with the Laplacian| ≈ 0.94), while the transposed orientation produces noise;
+- on game frames that residual is a small edge-aware *smoothing* step (mean ≈ 0.002), too subtle to see when added;
+- applied in reverse with gain ≈ 2, it visibly sharpens lettering and badges with mild halos; gain 6 rings, so the gain is capped at 3.5 and the per-pixel change is clamped.
+
+The network therefore runs as a learned unsharp mask. It's honest to call it detail enhancement. It's not generative relighting.

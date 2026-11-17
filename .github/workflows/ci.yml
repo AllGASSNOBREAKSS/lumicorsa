@@ -7,14 +7,25 @@ jobs:
       - uses: actions/checkout@v4
       - name: Toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y -qq g++-mingw-w64-x86-64 luajit zip
-      - name: ReShade effect compiler (pinned)
+      - name: ReShade effect compiler (pinned, legacy path)
         run: |
           git clone -q https://github.com/crosire/reshade.git ../ref/reshade-src
           git -C ../ref/reshade-src checkout -q 7bf9de8b33bcc76c3177007e65d73c72dd0f34c0
           git -C ../ref/reshade-src submodule update --init --depth 1 deps/spirv
-      - name: Check shaders, Lua app, cross-layer consistency; build add-on
+      - name: CSP app mock test, consistency, legacy shader + add-on, package
         run: make all
       - uses: actions/upload-artifact@v4
         with:
-          name: photolap-addon64
+          name: photolap-csp-app
+          path: dist/Photolap-v*.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photolap-legacy-addon64
           path: bin/photolap.addon64
+
+  csp-shaders:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile every CSP shader (d3dcompiler_47, ps_5_0)
+        run: python tools/hlslcheck.py
