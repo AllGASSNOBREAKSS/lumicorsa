@@ -2,10 +2,11 @@
 
 | Component | Where | Licence |
 |---|---|---|
-| Space Grotesk (The Space Grotesk Project Authors) | `app/Pitwall/fonts/SpaceGrotesk-*.ttf` | SIL Open Font License 1.1, see `app/Pitwall/fonts/OFL.txt` |
-| Anime4K v4 "Restore CNN Soft (S)" weights (bloc97) | `app/Pitwall/shaders/nn_0.hlsl` … `nn_3.hlsl`, generated from `glsl/Restore/Anime4K_Restore_CNN_Soft_S.glsl` by `tools/anime4k_to_hlsl.py` | MIT (text below) |
+| Inter (The Inter Project Authors, Rasmus Andersson) | `app/Lumicorsa/fonts/Inter-*.ttf` | SIL Open Font License 1.1, see `app/Lumicorsa/fonts/OFL-Inter.txt` |
+| JetBrains Mono (The JetBrains Mono Project Authors) | `app/Lumicorsa/fonts/JetBrainsMono-*.ttf` | SIL Open Font License 1.1, see `app/Lumicorsa/fonts/OFL-JetBrainsMono.txt` |
+| Anime4K v4 "Restore CNN Soft (S)" weights (bloc97) | `app/Lumicorsa/shaders/nn_0.hlsl` … `nn_3.hlsl`, generated from `glsl/Restore/Anime4K_Restore_CNN_Soft_S.glsl` by `tools/anime4k_to_hlsl.py` | MIT (text below) |
 
-Pitwall Neural uses the Anime4K weights unchanged. Pitwall applies the network's residual in the opposite direction, with a gain and a clamp, as a learned detail enhancer. Source: https://github.com/bloc97/Anime4K (commit 7684e95).
+Lumicorsa Neural uses the Anime4K weights unchanged. Lumicorsa applies the network's residual in the opposite direction, with a gain and a clamp, as a learned detail enhancer. Source: https://github.com/bloc97/Anime4K (commit 7684e95).
 
 ```
 MIT License
@@ -32,6 +33,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-Pitwall works with, but doesn't include, Custom Shaders Patch, Content Manager and Pure. Pure's apps are opened, not copied.
+Lumicorsa works with, but doesn't include, Custom Shaders Patch, Content Manager and Pure. Pure's apps are opened, not copied.
 NVIDIA and DLSS are trademarks of NVIDIA Corporation. Assetto Corsa is a trademark of Kunos Simulazioni.
-Pitwall is not affiliated with NVIDIA, Kunos Simulazioni, the CSP authors or the Pure author.
+Lumicorsa is not affiliated with NVIDIA, Kunos Simulazioni, the CSP authors or the Pure author.
+
+The design package's FK Grotesk fonts (Florian Karsten / FK Type) are trial files for personal use only and are not part of this repository or the release.
