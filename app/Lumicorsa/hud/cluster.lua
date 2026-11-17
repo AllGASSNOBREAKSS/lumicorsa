@@ -98,7 +98,20 @@ local enabledLamps = {}
 local function parseLamps(str) for k in pairs(enabledLamps) do enabledLamps[k] = nil end; for k in str:gmatch('[^,]+') do enabledLamps[k] = true end end
 
 -- Draws the cluster with its top-left at `o` (window px), `k` px per design unit. `T` = theme (fonts).
+local ALL_ASSETS = { 'hood.png', 'speedo_kmh.png', 'speedo_mph.png', 'tach_c.png', 'tach_f.png', 'needle.png', 'needle_orange.png',
+  'needle_white.png', 'subneedle.png', 'overlay.png', 'lamps_on.png', 'lamps_off.png', 'turn_on.png', 'turn_off.png', 'lcd_overlay.png' }
+local assetsReady = false
+-- True once every layer is loaded; asking also starts the loads. Until then nothing is drawn (no half-drawn cluster).
+function M.ready()
+  if assetsReady then return true end
+  local all = true
+  for _, f in ipairs(ALL_ASSETS) do if not ui.isImageReady(ASSETS .. f) then all = false end end
+  assetsReady = all
+  return all
+end
+
 function M.draw(St, T, o, k, now)
+  if not M.ready() then return end
   local s = carState(St, now)
   if not s then return end
   parseLamps(St.lamps)
@@ -208,15 +221,35 @@ M.SIZE = DESIGN
 local POS = { tl = vec2(0, 0), tc = vec2(0.5, 0), tr = vec2(1, 0), ml = vec2(0, 0.5), mc = vec2(0.5, 0.5), mr = vec2(1, 0.5),
   bl = vec2(0, 1), bc = vec2(0.5, 1), br = vec2(1, 1) }
 function M.scale(St) return 0.42 * St.hudScale / 100 end   -- 100% = 588 x 302 px
-function M.place(St)
-  local w = ac.accessAppWindow('IMGUI_LUA_Lumicorsa_hud')
-  if not w then return end
+-- Where the cluster is drawn: the HUD window's top-left (so dragging the window moves it), or the chosen anchor
+-- when the window can't be accessed. Cached; refreshed by M.track() while the window is open, and by M.place().
+local origin = nil
+local function anchor(St)
   local screen = ac.getUI().windowSize
   local size = DESIGN * M.scale(St)
   local a = POS[St.hudPos] or POS.bc
   local margin = 24
+  return vec2(margin + (screen.x - size.x - margin * 2) * a.x, margin + (screen.y - size.y - margin * 2) * a.y)
+end
+function M.origin(St)
+  if not origin then
+    local w = ac.accessAppWindow('IMGUI_LUA_Lumicorsa_hud')
+    origin = w and w:position() or anchor(St)
+  end
+  return origin
+end
+function M.track(St)
+  local w = ac.accessAppWindow('IMGUI_LUA_Lumicorsa_hud')
+  if w then origin = w:position() end
+end
+
+function M.place(St)
+  local w = ac.accessAppWindow('IMGUI_LUA_Lumicorsa_hud')
+  if not w then origin = anchor(St); M.last.pos, M.last.scale = St.hudPos, St.hudScale; return end
+  local size = DESIGN * M.scale(St)
   w:resize(size)
-  w:move(vec2(margin + (screen.x - size.x - margin * 2) * a.x, margin + (screen.y - size.y - margin * 2) * a.y))
+  origin = anchor(St)
+  w:move(origin)
   M.last.pos = St.hudPos
   M.last.scale = St.hudScale
 end

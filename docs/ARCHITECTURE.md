@@ -19,7 +19,8 @@ backend/system       ReShade (optional), profiles, GPU budget, screenshots, repl
 backend/telemetry    measured numbers only (dt, CPU load, VRAM, GPU frame time, measured effect costs)
 backend/verify       self-test, proof screenshots, online soak, unattended autorun
 ui/                  theme, widgets, dashboard, tabs, palette, quick ring
-hud/                 cluster.lua + cluster_assets (PNG layers pre-rendered from the design SVG)
+hud/                 cluster.lua + cluster_assets (PNG layers pre-rendered from the design SVG); drawn in the first UI
+                     callback every game frame, at the HUD window's position (the window is only a drag handle)
 shaders/             HLSL
 ```
 
@@ -28,6 +29,8 @@ shaders/             HLSL
 - **Every control is a registry entry**, with a readback from where the value really lives: the config file on disk, a CSP API getter, the values the shader received on the last frame, or what the cluster drew. The self-test sets, reads back and restores each one. A control with no API isn't in the app.
 - **SDK gate:** `tools/sdk_check.py` fails if the app calls an `ac.*`, `ui.*`, `render.*`, `physics.*`, `web.*` or `io.*` function that isn't in CSP's SDK for build 4263. The names are in `tools/sdk_names_csp4263.txt`, generated from the SDK CSP ships with that build. The public acc-lua-sdk repo is incomplete for core `ui.*` functions.
 - **Nothing per frame on disk:** canvases are created once per resolution. Fonts are DWrite strings cached by CSP. Slider writes wait 250 ms after the last change.
+- **No popping:** preset changes crossfade over 1.5 s; sun shafts fade over 0.6 s; the depth direction is a latched
+  decision voted by sky pixels; an effect whose shader is still compiling stays off instead of feeding a stale texture.
 - **Glass:** one quarter-res, two-pass blur of the frame per UI frame, drawn once per window with `ui.drawImageRounded`.
 - **Honest stats:** frame rate, frame time, 1% low and the histogram come from `dt`. CPU load is `cpuOccupancy`, VRAM is `ac.getVRAMConsumption`, and GPU frame time is `ac.getPerformanceCPUAndGPUTime`. Lua has no GPU-load getter, so there's no GPU donut. Effect costs come from System › Measure effect costs, which switches each group off for 1.5 s and records the GPU frame-time drop.
 

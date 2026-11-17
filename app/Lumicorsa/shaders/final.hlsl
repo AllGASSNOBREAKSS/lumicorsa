@@ -85,7 +85,7 @@ float4 main(PS_IN pin) {
       hdr += plTent(txPLBloom, uv, px * 2.0) / 5.0 * PL_BloomIntensity;
       hdr += plSample(txPLWide, uv) / 3.0 * float3(1.0, 0.32, 0.12) * PL_Halation * 0.6;
     }
-    if (gPLShaftsOn > 0.5) hdr += plSample(txPLShafts, uv) * gPLSunColor * PL_Shafts;
+    if (gPLShaftsOn > 0.001) hdr += plSample(txPLShafts, uv) * gPLSunColor * PL_Shafts * gPLShaftsOn;   // faded in Lua
     if (gPLFlareOn > 0.5) hdr += plSample(txPLFlare, uv) * PL_Flare * 0.35;
     float3 ldr = lerp(saturate(hdr), plFilmic(hdr), PL_FilmicStrength);
     float lum = plLuma(ldr);

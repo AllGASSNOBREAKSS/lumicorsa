@@ -56,7 +56,7 @@ local P = {
   blur = pass('blur9', { txPLSrc = false }, { gPLDir = vec2() }),
   colorQ = pass('color_quarter', { txPLSrc = SCREEN }, { gPLSrcTexel = vec2() }),
   blurC = pass('blur9c', { txPLSrc = false }, { gPLDir = vec2() }),
-  probe = pass('depth_probe', { txPLDepth = DEPTH }, {}),
+  probe = pass('depth_probe', { txPLDepth = DEPTH, txPLPrev = false }, {}),
 }
 
 -- Defaults for every look value; presets and sliders overwrite them.
@@ -91,7 +91,10 @@ local final = {
 -- ---------------------------------------------------------------------------------------------- render targets
 local T = nil
 local W, H = 0, 0
-local adaptFlip = false
+local adaptFlip, probeFlip = false, false
+local probe = nil          -- the probe canvas written this frame
+local ready = {}           -- passes whose shader has compiled and drawn at least once (CSP compiles async)
+local sunFade, sunUV = 0, vec2(0.5, 0.3)   -- shafts fade in and out instead of popping
 
 local function canvas(w, h)
   return ui.ExtraCanvas(vec2(math.max(1, math.floor(w)), math.max(1, math.floor(h))), 1, render.AntialiasingMode.None, F16)
@@ -99,7 +102,7 @@ end
 
 local function dispose()
   if T then for _, c in pairs(T) do c:dispose() end end
-  T = nil
+  T, probe = nil, nil
 end
 
 -- Canvases are created once per resolution, never per frame.
@@ -119,7 +122,7 @@ local function ensureTargets()
     q = canvas(W / 4, H / 4), qb = canvas(W / 4, H / 4),
     cq = canvas(W / 4, H / 4), cqb = canvas(W / 4, H / 4),
     gq = canvas(W / 4, H / 4), gqb = canvas(W / 4, H / 4),
-    probe = canvas(1, 1),
+    probeA = canvas(1, 1), probeB = canvas(1, 1),
   }
 end
 
@@ -149,7 +152,13 @@ M.active = {}
 function M.render(s)
   ensureTargets()
   local ok = true
-  local function run(target, p) if not target:updateWithShader(p) then ok = false end end
+  -- A pass whose shader is still compiling (async) leaves its target stale; the group using it stays off until it's
+  -- ready, so the final pass never samples an empty or old texture (2.0.0 flashed when an effect was first enabled).
+  local function run(target, p)
+    if target:updateWithShader(p) then ready[p] = true; return true end
+    ok = false
+    return false
+  end
   local full = vec2(1 / W, 1 / H)
   local v = s.values
   local off = s.off or {}
@@ -164,8 +173,10 @@ function M.render(s)
     P.nn1.values.gPLTexel = full; P.nn1.textures.txPLIn = T.nnA; run(T.nnB, P.nn1)
     P.nn2.values.gPLTexel = full; P.nn2.textures.txPLIn = T.nnB; run(T.nnA, P.nn2)
     P.nn3.values.gPLTexel = full; P.nn3.values.gPLIntensity = s.nrGain; P.nn3.textures.txPLIn = T.nnA; run(T.nnOut, P.nn3)
-    base = T.nnOut
-    act.neural = true
+    if ready[P.nn0] and ready[P.nn1] and ready[P.nn2] and ready[P.nn3] then
+      base = T.nnOut
+      act.neural = true
+    end
   end
 
   local adaptOn = (s.adaptRate or 0) > 0 and not off.exposure
@@ -175,9 +186,13 @@ function M.render(s)
     local dst, prev = adaptFlip and T.adaptA or T.adaptB, adaptFlip and T.adaptB or T.adaptA
     P.adapt.textures.txPLSmall, P.adapt.textures.txPLPrev = T.lumS, prev
     P.adapt.values.gPLRate = math.min(1, s.adaptRate * (ac.getUI().dt or 0.016) * 4)
-    run(dst, P.adapt)
-    final.textures.txPLAdapt = dst
-    act.exposure = true
+    if run(dst, P.adapt) and ready[P.lumSmall] then
+      final.textures.txPLAdapt = dst
+      act.exposure = true
+    else
+      adaptFlip = not adaptFlip           -- keep the last good value as "previous"
+      adaptOn = false
+    end
   end
 
   local recover = s.conflict and 0 or v.PL_HighlightRecover
@@ -185,7 +200,13 @@ function M.render(s)
 
   local mistOn = s.mist and (v.PL_Mist or 0) > 0 and not off.mist
   local needDepth = s.atmos or s.ao or s.shafts or s.dof or mistOn
-  if needDepth then run(T.probe, P.probe) end
+  if needDepth or not probe then
+    probeFlip = not probeFlip
+    local dst, prev = probeFlip and T.probeA or T.probeB, probeFlip and T.probeB or T.probeA
+    P.probe.textures.txPLPrev = prev
+    if run(dst, P.probe) then probe = dst else probeFlip = not probeFlip end
+  end
+  local pr = probe or T.probeA
 
   local bloomOn = s.light and ((v.PL_BloomIntensity or 0) > 0 or (v.PL_Halation or 0) > 0) and not off.bloom
   local flareOn = s.light and s.flare and (v.PL_Flare or 0) > 0 and not off.sun
@@ -195,40 +216,48 @@ function M.render(s)
     pf.values.gPLRecover = recover; pf.values.gPLExposure = v.PL_Exposure or 0
     pf.values.gPLThreshold = s.conflict and 0.8 or 1.25
     run(T.d2, pf)
-    for _, l in ipairs({ { T.d2, T.d4 }, { T.d4, T.d8 }, { T.d8, T.d16 }, { T.d16, T.d32 } }) do
+    for _, l in ipairs({ { T.d2, T.d4 }, { T.d4, T.d8 }, { T.d8, T.d16 }, { T.d16, T.d32 } }) do -- luacheck: ignore
       P.down.textures.txPLSrc = l[1]; P.down.values.gPLSrcTexel = texel(l[1]); run(l[2], P.down)
     end
     if bloomOn then
       for _, l in ipairs({ { T.d16, T.d32, T.u16 }, { T.d8, T.u16, T.u8 }, { T.d4, T.u8, T.u4 }, { T.d2, T.u4, T.u2 } }) do
         P.up.textures.txPLSkip = l[1]; P.up.textures.txPLLow = l[2]; P.up.values.gPLLowTexel = texel(l[2]); run(l[3], P.up)
       end
-      act.bloom = true
+      bloomOn = ready[P.prefilter] and ready[P.down] and ready[P.up] or false
+      act.bloom = bloomOn or nil
     end
     if flareOn then
       P.flare.textures.txPLSrc = T.d8; P.flare.values.gPLAspect = W / H; run(T.flare, P.flare)
-      act.sun = true
+      flareOn = ready[P.prefilter] and ready[P.down] and ready[P.flare] or false
+      act.sun = flareOn or nil
     end
   end
 
-  local sun = (s.light and s.shafts and (v.PL_Shafts or 0) > 0 and not off.sun) and sunScreenUV() or nil
-  if sun then
-    P.shMask.textures.txPLSrc = base; P.shMask.textures.txPLProbe = T.probe; P.shMask.values.gPLSrcTexel = full
+  local shaftsWanted = s.light and s.shafts and (v.PL_Shafts or 0) > 0 and not off.sun
+  local sun = shaftsWanted and sunScreenUV() or nil
+  if sun then sunUV = sun end
+  local dt = math.min(ac.getUI().dt or 0.016, 0.1)
+  sunFade = math.max(0, math.min(1, sunFade + (sun and dt or -dt) / 0.6))     -- 0.6 s fade as the sun enters/leaves view
+  if not shaftsWanted then sunFade = 0 end
+  if sunFade > 0 then
+    P.shMask.textures.txPLSrc = base; P.shMask.textures.txPLProbe = pr; P.shMask.values.gPLSrcTexel = full
     run(T.shA, P.shMask)
-    P.shBlur.textures.txPLSrc = T.shA; P.shBlur.values.gPLSunUV = sun; P.shBlur.values.gPLLength = 0.85
+    P.shBlur.textures.txPLSrc = T.shA; P.shBlur.values.gPLSunUV = sunUV; P.shBlur.values.gPLLength = 0.85
     run(T.shB, P.shBlur)
-    act.sun = true
+    if ready[P.shMask] and ready[P.shBlur] then act.sun = true else sunFade = 0 end
   end
 
   local aoOn = s.ao and (v.PL_AO or 0) > 0 and not off.ao
   if aoOn then
     local a = P.ao
-    a.textures.txPLProbe = T.probe
+    a.textures.txPLProbe = pr
     a.values.gPLTexel, a.values.gPLNear, a.values.gPLFar = texel(T.ao), near, far
     run(T.ao, a)
     local at = texel(T.ao)
     P.blur.textures.txPLSrc = T.ao;  P.blur.values.gPLDir = vec2(at.x, 0); run(T.aoB, P.blur)
     P.blur.textures.txPLSrc = T.aoB; P.blur.values.gPLDir = vec2(0, at.y); run(T.ao, P.blur)
-    act.ao = true
+    aoOn = ready[a] and ready[P.blur] or false
+    act.ao = aoOn or nil
   end
 
   local clarityOn = s.detail and (v.PL_Clarity or 0) > 0 and not off.detail
@@ -237,7 +266,8 @@ function M.render(s)
     local qt = texel(T.q)
     P.blur.textures.txPLSrc = T.q;  P.blur.values.gPLDir = vec2(qt.x, 0); run(T.qb, P.blur)
     P.blur.textures.txPLSrc = T.qb; P.blur.values.gPLDir = vec2(0, qt.y); run(T.q, P.blur)
-    act.detail = true
+    clarityOn = ready[P.lumaQ] and ready[P.blur] or false
+    act.detail = clarityOn or nil
   end
 
   local dofOn = s.dof and (v.PL_Dof or 0) > 0 and not off.dof
@@ -246,14 +276,15 @@ function M.render(s)
     local ct = texel(T.cq)
     P.blurC.textures.txPLSrc = T.cq;  P.blurC.values.gPLDir = vec2(ct.x * 2, 0); run(T.cqb, P.blurC)
     P.blurC.textures.txPLSrc = T.cqb; P.blurC.values.gPLDir = vec2(0, ct.y * 2); run(T.cq, P.blurC)
-    act.dof = true
+    dofOn = ready[P.colorQ] and ready[P.blurC] or false
+    act.dof = dofOn or nil
   end
 
   -- Final composite, fullscreen in UI space
   final.p2 = ac.getUI().windowSize
   local tx = final.textures
   tx.txPLBase = base
-  tx.txPLBloom, tx.txPLWide, tx.txPLLumaQ, tx.txPLProbe = T.u2, T.u8, T.q, T.probe
+  tx.txPLBloom, tx.txPLWide, tx.txPLLumaQ, tx.txPLProbe = T.u2, T.u8, T.q, pr
   tx.txPLShafts, tx.txPLFlare, tx.txPLAO, tx.txPLDofBlur = T.shB, T.flare, T.ao, T.cq
   if not tx.txPLAdapt then tx.txPLAdapt = T.adaptA end
   local fv = finalValues
@@ -264,12 +295,12 @@ function M.render(s)
   fv.gPLLight, fv.gPLAtmos = s.light and 1 or 0, s.atmos and 1 or 0
   fv.gPLDetail, fv.gPLLens = s.detail and 1 or 0, s.lens and 1 or 0
   fv.gPLBloomOn, fv.gPLSplit = bloomOn and 1 or 0, s.split and 1 or 0
-  fv.gPLShaftsOn, fv.gPLFlareOn = sun and 1 or 0, flareOn and 1 or 0
+  fv.gPLShaftsOn, fv.gPLFlareOn = sunFade, flareOn and 1 or 0
   fv.gPLAOOn, fv.gPLDofOn = aoOn and 1 or 0, dofOn and 1 or 0
   fv.gPLAdaptOn, fv.gPLMistOn = adaptOn and 1 or 0, mistOn and 1 or 0
   fv.gPLFocus = s.focus or 0
   fv.gPLNear, fv.gPLFar = near, far
-  fv.gPLTime = os.preciseClock()
+  fv.gPLTime = math.floor(os.preciseClock() * 24) / 24    -- grain changes at a steady 24 Hz, not with the frame rate
   if mistOn then
     local car = ac.getCar(0)
     local cam = sim.cameraPosition

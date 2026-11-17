@@ -83,6 +83,7 @@ function M.selftest(env)
     log(string.format('Lumicorsa self-test  %s  CSP %s  %s', os.date('%Y-%m-%d %H:%M:%S'),
       tostring(ac.getPatchVersion and ac.getPatchVersion() or '?'), sim.isOnlineRace and ('online: ' .. tostring(ac.getServerName())) or 'offline'))
     log(string.rep('-', 100))
+    waitUntil(function () return not telemetry.measuring end, 60)   -- a running cost measurement switches effects off
     local restore = env.prepare()           -- master on, every effect on, conflict rule off
     C.flush(true)
     wait(5)

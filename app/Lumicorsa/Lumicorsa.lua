@@ -227,7 +227,7 @@ local function frame(mode)
     envTimer = 0
     detectOtherGrading()
     graphics.recordTierFps(telemetry.fps(), St)
-    if St.autoLook then local pick = state.autoLookPick(); if pick ~= St.preset then state.applyPreset(pick) end end
+    if St.autoLook then local pick = state.autoLookPick(os.preciseClock()); if pick ~= St.preset then state.applyPreset(pick) end end
     local car = ac.getCar(0)
     local id = car and car:id()
     if id ~= carId then carId = id; camera.restoreChase() end
@@ -242,10 +242,17 @@ local function frame(mode)
     local off = system.budgetOff(St)
     if m then for k in pairs(m) do off[k] = true end end
     local t0 = os.preciseClock()
-    look.render(state.frameState(otherApp ~= nil and not env.ignoreConflict, off))
+    look.render(state.frameState(otherApp ~= nil and not env.ignoreConflict, off, dt))
     lookCpu = (os.preciseClock() - t0) * 1000
   else
     lookCpu = 0
+  end
+
+  -- the analog cluster: drawn here every game frame, at the HUD window's position. 2.0.0 drew it inside the window,
+  -- so it vanished whenever AC or another app hid app windows, and on every frame its textures weren't loaded yet.
+  if mode == 'game' and cluster.visibleInView(St) then
+    telemetry.time('hud', cluster.draw, St, T, cluster.origin(St), cluster.scale(St), os.preciseClock())
+    lastHud = frameNo
   end
 
   -- quick ring while Q is held (released: fire the hovered item)
@@ -279,10 +286,12 @@ function script.windowDashboard(dt)
   safe(telemetry.time, 'ui', dashboard.draw, env, built)
 end
 
+-- The HUD window is only a handle: drag it to move the cluster (which is drawn in the first UI callback above).
 function script.windowHud(dt)
-  if not cluster.visibleInView(St) then return end
-  safe(telemetry.time, 'hud', cluster.draw, St, T, vec2(0, 0), cluster.scale(St), os.preciseClock())
-  lastHud = frameNo
+  if ui.windowHovered() then
+    ui.drawRect(vec2(1, 1), ui.windowSize() - 1, rgbm(1, 0.71, 0.28, 0.6), 12, nil, 1.5)
+  end
+  cluster.track(St)
 end
 
 -- ---------------------------------------------------------------------------------------------- start-up

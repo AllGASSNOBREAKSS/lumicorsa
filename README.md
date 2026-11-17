@@ -8,7 +8,7 @@ drive, audio and sky setting in one panel. Runs inside Custom Shaders Patch; wor
 
 ## Install
 
-1. Download `Lumicorsa-v2.0.0.zip` from [Releases](https://github.com/AllGASSNOBREAKSS/lumicorsa/releases).
+1. Download `Lumicorsa-v2.0.1.zip` from [Releases](https://github.com/AllGASSNOBREAKSS/lumicorsa/releases).
 2. Drag it onto Content Manager and click **Install** (it unpacks to `assettocorsa/apps/lua/Lumicorsa`).
 3. Start a session. Needs Content Manager and CSP (built and checked against CSP 0.3.0-preview728).
 

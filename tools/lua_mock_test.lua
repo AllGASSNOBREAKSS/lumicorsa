@@ -155,6 +155,7 @@ end
 
 local clickFilter, lastId, mouseLocal = function () return false end, '', vec2(400, 300)
 ui = setmetatable({
+  isImageReady = function () return true end,
   KeyIndex = { P = 80, O = 79, H = 72, Q = 81, K = 75 }, Key = { Up = 1, Down = 2, Escape = 3, Enter = 4 },
   Alignment = { Start = -1, Center = 0, End = 1 }, MouseButton = { Left = 0, Right = 1 }, CornerFlags = { Top = 3 },
   StyleColor = { FrameBg = 7 }, InputTextFlags = { None = 0 },
@@ -296,6 +297,17 @@ print('dashboard: all tabs in all modes, every control clicked: OK')
 -- 4. HUD
 for _, u in ipairs({ 'km/h', 'mph' }) do St.units = u; St.hudOn = true; script.windowHud(1 / 60); frame(1); check('hud ' .. u) end
 assert(require('hud/cluster').last.units == 'mph', 'cluster drew with mph')
+-- the cluster must not depend on the HUD window being visible (AC and other apps hide app windows)
+do
+  local w = WINDOWS.IMGUI_LUA_Lumicorsa_hud
+  if w then w.vis = false end
+  St.units = 'km/h'; frame(1)
+  assert(require('hud/cluster').last.units == 'km/h', 'cluster drawn with its window hidden')
+  St.hudViews = 'Chase'; St.units = 'mph'; frame(1)
+  assert(require('hud/cluster').last.units == 'km/h', 'cluster hidden outside its chosen view')
+  St.hudViews = 'All views'; if w then w.vis = true end
+  print('hud without its window: OK')
+end
 
 -- 5. debounce: a slider write waits for 250 ms
 local d = R.get('shdist')

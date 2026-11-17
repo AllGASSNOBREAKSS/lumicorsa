@@ -18,9 +18,12 @@ M.store = ac.storage({
   sweep = true, needle = 'Red', lcd = 'Orange', shiftAt = 80, warm = true, glow = 45,
   lamps = 'indicators,high,engine,belt,abs,brake,tpms,battery',
   autoWipers = false, overlay = false, budget = 3.0, budgetOn = false, timeSpeed = 1,
-  measured = '', tierFps = '', mix = 'Onboard',
+  measured = '', tierFps = '', mix = 'Onboard', ver = 200,
 })
 local S = M.store
+
+-- 2.0.1: "Show in" was easy to leave on Chase, which hides the HUD in every other view. Reset it once.
+if S.ver < 201 then S.hudViews = 'All views'; S.ver = 201 end
 
 -- ---------------------------------------------------------------------------------------------- look values
 M.values = {}
@@ -38,7 +41,9 @@ local function saveLook()
   C.later('state/look', out, function (t) blob.json = JSON.stringify(t) end)
 end
 
-function M.setValue(k, v) M.values[k] = v; saveLook() end
+local fade = nil   -- preset crossfade in progress (see M.applyPreset)
+-- A value set directly (slider, profile import) takes effect at once, even during a crossfade.
+function M.setValue(k, v) M.values[k] = v; if fade then fade.from[k] = v end; saveLook() end
 
 -- ---------------------------------------------------------------------------------------------- presets
 -- The five looks from the design. Each sets every look value (blending needs complete sets).
@@ -66,8 +71,16 @@ M.PRESETS = {
 }
 function M.presetByName(n) for _, p in ipairs(M.PRESETS) do if p.name == n then return p end end return M.PRESETS[1] end
 
+-- Preset changes crossfade over 1.5 s instead of snapping (no visible jump, no flicker when auto look switches).
+local function startFade()
+  local from = {}
+  for k, v in pairs(M.values) do from[k] = v end
+  fade = { from = from, t = 0, dur = 1.5 }
+end
+
 function M.applyPreset(name)
   local p = M.presetByName(name)
+  startFade()
   for k, v in pairs(p.values) do M.values[k] = v end
   S.preset, S.nr, S.blend = p.name, p.nr, 0
   saveLook()
@@ -75,6 +88,7 @@ end
 
 -- Look blender: Photoreal crossfaded with a second look (0..100).
 function M.applyBlend(t, other)
+  fade = nil                                                  -- the blender is a live slider
   S.blend, S.blendWith = t, other or S.blendWith
   local a, b = M.PRESETS[1], M.presetByName(S.blendWith)
   local k = t / 100
@@ -83,21 +97,46 @@ function M.applyBlend(t, other)
   saveLook()
 end
 
--- Auto look by time of day (and rain): checked every 20 s while enabled.
-function M.autoLookPick()
+-- Auto look by time of day (and rain), with hysteresis so values near a boundary don't flip the look back and forth:
+-- rain switches on above 15% and off below 5%, time boundaries move 15 minutes away from the current look, and a look
+-- is held for at least 60 s.
+local autoHeld, autoSince = nil, -1e9
+function M.autoLookPick(now)
   local sim = ac.getSim()
-  if (sim.rainIntensity or 0) > 0.1 then return 'Rain run' end
+  local rain = sim.rainIntensity or 0
   local h = (sim.timeTotalSeconds or 43200) / 3600
-  if h < 6 or h >= 20.5 then return 'Night run' end
-  if h < 8 or h >= 17.5 then return 'Golden hour' end
-  return 'Photoreal'
+  local cur = autoHeld
+  local m = 0.25
+  local function night(x) return x < 6 or x >= 20.5 end
+  local function golden(x) return (x >= 6 and x < 8) or (x >= 17.5 and x < 20.5) end
+  local pick
+  if rain > 0.15 or (cur == 'Rain run' and rain > 0.05) then pick = 'Rain run'
+  elseif cur == 'Night run' and (night(h - m) or night(h + m)) then pick = 'Night run'
+  elseif cur == 'Golden hour' and (golden(h - m) or golden(h + m)) and not night(h) then pick = 'Golden hour'
+  elseif night(h) then pick = 'Night run'
+  elseif golden(h) then pick = 'Golden hour'
+  else pick = 'Photoreal' end
+  if pick ~= cur and now - autoSince < 60 and cur ~= nil then return cur end
+  if pick ~= cur then autoHeld, autoSince = pick, now end
+  return pick
 end
 
 -- Frame state for look.render(), rebuilt from the store each frame without allocating.
 local frame = { values = {}, off = {} }
-function M.frameState(conflict, off)
+function M.frameState(conflict, off, dt)
   local sim = ac.getSim()
-  for k, v in pairs(M.values) do frame.values[k] = v end
+  if fade then
+    fade.t = fade.t + (dt or 0.016)
+    local x = math.min(fade.t / fade.dur, 1)
+    x = x * x * (3 - 2 * x)
+    for k, v in pairs(M.values) do
+      local a = fade.from[k]
+      frame.values[k] = (type(v) == 'number' and type(a) == 'number') and a + (v - a) * x or v
+    end
+    if fade.t >= fade.dur then fade = nil end
+  else
+    for k, v in pairs(M.values) do frame.values[k] = v end
+  end
   frame.light, frame.atmos, frame.detail, frame.lens = S.light, S.atmos, S.detail, S.lens
   frame.neural, frame.nrGain = S.neural, S.nr * 3.5
   frame.shafts, frame.flare, frame.ao, frame.mist = S.shafts, S.flare, S.ao, S.mist
@@ -140,7 +179,7 @@ function M.register(R)
   -- Look tab
   R.state('preset', 'Look preset', { kind = 'scenes', options = {}, key = 'all shader values',
     get = function () return S.blend == 0 and S.preset or nil end,
-    set = function (v) M.applyPreset(v) end, frames = 2,
+    set = function (v) M.applyPreset(v) end, frames = 110,          -- waits out the 1.5 s crossfade
     readback = function ()
       for _, p in ipairs(M.PRESETS) do
         local ok = true
